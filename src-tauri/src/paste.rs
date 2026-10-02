@@ -2,7 +2,7 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -16,6 +16,21 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::clipboard;
 use crate::state::AppState;
+
+#[tauri::command]
+pub fn copy_clip(state: State<'_, Mutex<AppState>>, id: i64) -> Result<(), String> {
+    let content = {
+        let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+        guard
+            .clips
+            .iter()
+            .find(|clip| clip.id == id)
+            .ok_or("记录不存在")?
+            .content
+            .clone()
+    };
+    clipboard::write_text(&content)
+}
 
 #[tauri::command]
 pub fn paste_clip(
@@ -34,9 +49,7 @@ pub fn paste_clip(
     };
 
     clipboard::write_text(&content)?;
-    if let Some(window) = app.get_webview_window("main") {
-        window.hide().map_err(|err| err.to_string())?;
-    }
+    crate::panel::hide(&app);
 
     if hwnd == 0 {
         return Err("已复制，请手动粘贴".into());
@@ -61,7 +74,7 @@ fn send_to_window(hwnd: isize) -> Result<(), String> {
     Ok(())
 }
 
-unsafe fn focus_window(target: HWND) {
+pub(crate) unsafe fn focus_window(target: HWND) {
     let foreground = GetForegroundWindow();
     let current = GetCurrentThreadId();
     let foreground_thread = GetWindowThreadProcessId(foreground, None);

@@ -30,6 +30,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             panel::list_clips,
             panel::hide_panel,
+            paste::copy_clip,
             paste::paste_clip,
             get_effect_state,
             ocr_image
@@ -62,9 +63,7 @@ pub fn run() {
                     if state::now_ms() < until {
                         return;
                     }
-                    if let Some(window) = blur_handle.get_webview_window("main") {
-                        let _ = window.hide();
-                    }
+                    panel::hide(&blur_handle);
                 }
             });
 
@@ -90,9 +89,13 @@ fn register_shortcut(app: &tauri::AppHandle) -> tauri::Result<()> {
     };
     let plugin = builder
         .with_handler(|app, shortcut, event| {
-            if event.state == ShortcutState::Pressed && shortcut.matches(Modifiers::ALT, Code::KeyV)
-            {
+            if event.state != ShortcutState::Pressed {
+                return;
+            }
+            if shortcut.matches(Modifiers::ALT, Code::KeyV) {
                 panel::toggle(app);
+            } else if shortcut.matches(Modifiers::empty(), Code::Escape) {
+                panel::hide(app);
             }
         })
         .build();

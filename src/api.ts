@@ -22,6 +22,10 @@ export function pasteClip(id: number): Promise<void> {
   return invoke("paste_clip", { id });
 }
 
+export function copyClip(id: number): Promise<void> {
+  return invoke("copy_clip", { id });
+}
+
 export function hidePanel(): Promise<void> {
   return invoke("hide_panel");
 }
