@@ -1,7 +1,7 @@
 :root {
   --font-ui: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
   --font-mono: "Cascadia Code", "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace;
-  --r-panel: 22px;
+  --r-panel: 8px; /* 对齐 Windows 11 系统圆角 */
   --r-card: 14px;
   --r-item: 12px;
   --r-ctl: 10px;

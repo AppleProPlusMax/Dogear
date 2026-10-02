@@ -5,6 +5,11 @@ use std::thread;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWCP_ROUND,
+};
+use windows::Win32::Graphics::Gdi::SetWindowRgn;
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetForegroundWindow};
 
 use crate::paste;
@@ -78,8 +83,34 @@ fn show(app: &AppHandle, window: &tauri::WebviewWindow) {
         unsafe { paste::focus_window(HWND(hwnd.0)) };
     }
     let _ = window.set_focus();
+    apply_system_corners(window);
     set_escape(app, true);
     let _ = app.emit("window-shown", ());
+}
+
+/// 交给 Windows 11 画圆角。半径与 `tokens.css` 的 `--r-panel: 8px` 对齐。
+pub fn apply_system_corners(window: &tauri::WebviewWindow) {
+    let Ok(raw) = window.hwnd() else {
+        return;
+    };
+    let hwnd = HWND(raw.0);
+    unsafe {
+        let _ = SetWindowRgn(hwnd, None, true);
+        let preference = DWMWCP_ROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &preference as *const _ as *const _,
+            std::mem::size_of_val(&preference) as u32,
+        );
+        let border = DWMWA_COLOR_NONE;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &border as *const _ as *const _,
+            std::mem::size_of_val(&border) as u32,
+        );
+    }
 }
 
 #[tauri::command]

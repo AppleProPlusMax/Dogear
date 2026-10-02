@@ -293,6 +293,7 @@ onUnmounted(() => {
 
 <style scoped>
 .panel {
+  box-sizing: border-box;
   height: 100%;
   display: flex;
   flex-direction: column;

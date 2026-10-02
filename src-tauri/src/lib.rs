@@ -40,6 +40,7 @@ pub fn run() {
                 .get_webview_window("main")
                 .ok_or("缺少主窗口 main")?;
             let effect = effects::apply(&window);
+            panel::apply_system_corners(&window);
             eprintln!(
                 "窗口效果: {}（build {}，透明 {}，高对比度 {}）{}",
                 effect.effect,
@@ -54,8 +55,8 @@ pub fn run() {
             }));
 
             let blur_handle = app.handle().clone();
-            window.on_window_event(move |event| {
-                if let WindowEvent::Focused(false) = event {
+            window.on_window_event(move |event| match event {
+                WindowEvent::Focused(false) => {
                     let Some(state) = blur_handle.try_state::<Mutex<AppState>>() else {
                         return;
                     };
@@ -65,6 +66,12 @@ pub fn run() {
                     }
                     panel::hide(&blur_handle);
                 }
+                WindowEvent::Resized(size) if size.width >= 8 && size.height >= 8 => {
+                    if let Some(window) = blur_handle.get_webview_window("main") {
+                        panel::apply_system_corners(&window);
+                    }
+                }
+                _ => {}
             });
 
             register_shortcut(app.handle())?;
