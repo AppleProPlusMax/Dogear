@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<title>Dogear 折角 · 主面板高保真原型（静态）</title>
+<meta name="viewport" content="width=840">
+<style>
+/* ===== Design tokens（与设计报告 v2 第 11 节一致）===== */
+:root{
+  --font-ui: "Segoe UI Variable Text","Segoe UI Variable","Segoe UI","SF Pro Text",Inter,"Microsoft YaHei UI","Noto Sans CJK SC","PingFang SC",sans-serif;
+  --font-mono: "Cascadia Code","SF Mono","JetBrains Mono",Consolas,"DejaVu Sans Mono",monospace;
+  --r-panel:22px; --r-card:14px; --r-item:12px; --r-ctl:10px; --r-chip:7px;
+  --ease: cubic-bezier(.2,.8,.2,1);
+}
+[data-theme="light"]{
+  --wall-a:#DCE6FF; --wall-b:#F1E6FF; --wall-c:#FFE8DC;
+  --panel: rgba(250,250,252,.70); --panel-border: rgba(255,255,255,.75);
+  --panel-shadow: 0 30px 80px rgba(40,50,110,.28), 0 2px 8px rgba(20,24,60,.10);
+  --text:#1D1D1F; --text-2:rgba(60,60,67,.72); --text-3:rgba(60,60,67,.56);
+  --fill: rgba(120,120,128,.12); --fill-2: rgba(120,120,128,.07);
+  --sep: rgba(60,60,67,.10);
+  --accent:#4A5AF0; --accent-soft: rgba(74,90,240,.12); --accent-ring: rgba(74,90,240,.32); --on-accent:#fff;
+  --card: rgba(255,255,255,.72); --card-border: rgba(60,60,67,.08);
+  --seg-thumb:#fff; --seg-shadow:0 1px 3px rgba(0,0,0,.12), 0 0 0 .5px rgba(0,0,0,.04);
+  --kbd-bg: rgba(255,255,255,.8); --kbd-border: rgba(60,60,67,.14);
+  --tile-text:#5B6CFF; --tile-link:#0A84FF; --tile-img:#FF8A3D; --tile-code:#8E5BFF; --tile-json:#17A688; --tile-sql:#D6458B; --tile-ocr:#FF6B6B; --tile-color:#5B6CFF;
+  --j-key:#4756E0; --j-str:#0E8F73; --j-num:#D4691A; --j-bool:#C23B8A; --j-punc:rgba(60,60,67,.5);
+  --good:#1FA971; --warn:#E5890A;
+  --shot-bg:#fff; --shot-line:#D5D8E3; --shot-title:#2A2D3A;
+}
+[data-theme="dark"]{
+  --wall-a:#1B2140; --wall-b:#2A1B45; --wall-c:#15283A;
+  --panel: rgba(34,35,42,.66); --panel-border: rgba(255,255,255,.10);
+  --panel-shadow: 0 30px 90px rgba(0,0,0,.6), 0 2px 8px rgba(0,0,0,.35);
+  --text:#F5F5F7; --text-2:rgba(235,235,245,.62); --text-3:rgba(235,235,245,.50);
+  --fill: rgba(235,235,245,.10); --fill-2: rgba(235,235,245,.06);
+  --sep: rgba(255,255,255,.08);
+  --accent:#7C8BFF; --accent-soft: rgba(124,139,255,.20); --accent-ring: rgba(124,139,255,.42); --on-accent:#0B0D1F;
+  --card: rgba(255,255,255,.055); --card-border: rgba(255,255,255,.07);
+  --seg-thumb:rgba(255,255,255,.16); --seg-shadow:0 1px 3px rgba(0,0,0,.4);
+  --kbd-bg: rgba(255,255,255,.08); --kbd-border: rgba(255,255,255,.14);
+  --tile-text:#8F9CFF; --tile-link:#4DA3FF; --tile-img:#FFA05E; --tile-code:#B08CFF; --tile-json:#3FD1B0; --tile-sql:#FF74B0; --tile-ocr:#FF8A8A; --tile-color:#8F9CFF;
+  --j-key:#9CA8FF; --j-str:#5FE0BF; --j-num:#FFB067; --j-bool:#FF8CC4; --j-punc:rgba(235,235,245,.45);
+  --good:#4BD694; --warn:#FFB340;
+  --shot-bg:#F4F5F9; --shot-line:#CBCFDD; --shot-title:#2A2D3A;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:840px;height:1040px;overflow:hidden}
+body{font-family:var(--font-ui);color:var(--text);-webkit-font-smoothing:antialiased;font-size:13px;line-height:1.4;
+  background:
+   radial-gradient(520px 420px at 12% 18%, rgba(91,108,255,.55), transparent 70%),
+   radial-gradient(500px 460px at 88% 30%, rgba(255,140,200,.45), transparent 70%),
+   radial-gradient(560px 480px at 70% 92%, rgba(80,200,255,.45), transparent 70%),
+   linear-gradient(135deg,var(--wall-a),var(--wall-b) 55%,var(--wall-c));
+  position:relative}
+[data-theme="dark"] body{background:
+   radial-gradient(520px 420px at 12% 18%, rgba(91,108,255,.45), transparent 70%),
+   radial-gradient(500px 460px at 88% 30%, rgba(180,80,220,.35), transparent 70%),
+   radial-gradient(560px 480px at 70% 92%, rgba(40,160,220,.32), transparent 70%),
+   linear-gradient(135deg,var(--wall-a),var(--wall-b) 55%,var(--wall-c));}
+/* 背景里一个虚化的“别的窗口”，用来让毛玻璃有东西可透 */
+.ghost{position:absolute;left:-60px;top:140px;width:520px;height:340px;border-radius:14px;background:rgba(255,255,255,.55);box-shadow:0 20px 60px rgba(0,0,0,.18)}
+.ghost i{position:absolute;left:28px;height:12px;border-radius:6px;background:rgba(91,108,255,.55)}
+[data-theme="dark"] .ghost{background:rgba(255,255,255,.10)}
+.ghost2{position:absolute;right:-80px;bottom:60px;width:420px;height:300px;border-radius:14px;background:rgba(255,255,255,.4);box-shadow:0 20px 60px rgba(0,0,0,.16)}
+[data-theme="dark"] .ghost2{background:rgba(255,255,255,.07)}
+
+/* ===== 面板 ===== */
+.panel{position:absolute;left:30px;top:30px;width:780px;height:980px;border-radius:var(--r-panel);
+  background:var(--panel);backdrop-filter:blur(40px) saturate(180%);-webkit-backdrop-filter:blur(40px) saturate(180%);
+  border:1px solid var(--panel-border);box-shadow:var(--panel-shadow), inset 0 1px 0 rgba(255,255,255,.35);
+  display:flex;flex-direction:column;overflow:hidden}
+[data-theme="dark"] .panel{box-shadow:var(--panel-shadow), inset 0 1px 0 rgba(255,255,255,.08)}
+.top{padding:20px 22px 0}
+.search{height:46px;border-radius:13px;background:var(--fill);display:flex;align-items:center;gap:10px;padding:0 14px;position:relative}
+.search svg{width:19px;height:19px;stroke:var(--text-2);fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.search .q{font-size:16px;letter-spacing:.1px;color:var(--text);flex:1;display:flex;align-items:center}
+.search .caret{display:inline-block;width:1.5px;height:19px;background:var(--accent);margin-left:1px;border-radius:1px}
+.search .hint{color:var(--text-3);margin-left:10px;font-size:13px}
+.privacy{display:flex;align-items:center;gap:5px;font-size:11.5px;color:var(--text-2);padding:4px 9px;border-radius:999px;background:var(--fill-2);border:1px solid var(--card-border)}
+.privacy svg{width:12px;height:12px;stroke:var(--good);stroke-width:2}
+/* 分段控件 */
+.tabs{margin-top:14px;display:flex;align-items:center;justify-content:space-between}
+.seg{display:inline-flex;padding:2.5px;border-radius:11px;background:var(--fill);gap:1px}
+.seg span{padding:5.5px 15px;border-radius:8.5px;font-size:13px;font-weight:500;color:var(--text-2);display:flex;gap:6px;align-items:center}
+.seg span em{font-style:normal;font-size:11px;color:var(--text-3);font-variant-numeric:tabular-nums}
+.seg span.on{background:var(--seg-thumb);box-shadow:var(--seg-shadow);color:var(--text)}
+.seg span.on em{color:var(--text-2)}
+.tabs .smart{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--text-2)}
+.chip-s{padding:3px 8px;border-radius:999px;background:var(--accent-soft);color:var(--accent);font-weight:600;font-size:11.5px}
+
+/* 主体 */
+.body{flex:1;display:grid;grid-template-columns:350px 1fr;margin-top:14px;border-top:1px solid var(--sep);min-height:0}
+.list{padding:8px 10px 0;border-right:1px solid var(--sep);overflow:hidden;position:relative}
+.list:after{content:"";position:absolute;left:0;right:0;bottom:0;height:60px;background:linear-gradient(transparent,var(--panel));pointer-events:none;opacity:.9}
+.grp{font-size:11.5px;font-weight:600;color:var(--text-3);padding:10px 10px 5px;letter-spacing:.3px}
+.item{display:flex;align-items:center;gap:11px;padding:9px 10px;border-radius:var(--r-item);height:58px;position:relative;margin-bottom:2px}
+.item.sel{background:var(--accent-soft);box-shadow:inset 0 0 0 1px var(--accent-ring)}
+.tile{width:38px;height:38px;border-radius:10px;flex:none;display:grid;place-items:center;position:relative;overflow:hidden}
+.tile svg{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.t-text{color:var(--tile-text);background:color-mix(in srgb,var(--tile-text) 14%,transparent)}
+.t-link{color:var(--tile-link);background:color-mix(in srgb,var(--tile-link) 14%,transparent)}
+.t-code{color:var(--tile-code);background:color-mix(in srgb,var(--tile-code) 14%,transparent)}
+.t-json{color:var(--tile-json);background:color-mix(in srgb,var(--tile-json) 15%,transparent)}
+.t-sql{color:var(--tile-sql);background:color-mix(in srgb,var(--tile-sql) 14%,transparent)}
+.t-img{color:var(--tile-img);background:color-mix(in srgb,var(--tile-img) 14%,transparent)}
+.swatch{width:38px;height:38px;border-radius:10px;flex:none;background:linear-gradient(135deg,#7D8BFF,#5B6CFF 60%,#4A52EA);box-shadow:inset 0 0 0 1px rgba(255,255,255,.35),0 2px 8px rgba(91,108,255,.35)}
+.shot{width:38px;height:38px;border-radius:10px;flex:none;background:linear-gradient(160deg,#fff,#eef1fb);box-shadow:inset 0 0 0 1px rgba(60,60,67,.14);padding:6px 6px;display:flex;flex-direction:column;gap:3px;overflow:hidden}
+[data-theme="dark"] .shot{box-shadow:inset 0 0 0 1px rgba(255,255,255,.2)}
+.shot i{display:block;height:3px;border-radius:2px;background:#C9CEE0}
+.shot i:first-child{background:#5B6CFF;width:55%}
+.meta{flex:1;min-width:0}
+.title{font-size:13.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text);letter-spacing:.05px}
+.title.mono{font-family:var(--font-mono);font-size:12.5px;font-weight:450}
+.sub{margin-top:2px;font-size:11.5px;color:var(--text-2);display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden}
+.time{font-size:11.5px;color:var(--text-3);align-self:flex-start;margin-top:3px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.badge{font-size:10px;font-weight:700;letter-spacing:.4px;padding:1.5px 5.5px;border-radius:5px;line-height:1.35}
+.b-json{color:var(--tile-json);background:color-mix(in srgb,var(--tile-json) 16%,transparent)}
+.b-sql{color:var(--tile-sql);background:color-mix(in srgb,var(--tile-sql) 15%,transparent)}
+.b-ocr{color:var(--good);background:color-mix(in srgb,var(--good) 16%,transparent)}
+.b-ts{color:var(--tile-code);background:color-mix(in srgb,var(--tile-code) 15%,transparent)}
+.pin{width:12px;height:12px;stroke:var(--warn);fill:var(--warn);stroke-width:1.5;flex:none}
+.spin{width:12px;height:12px;border-radius:50%;border:1.8px solid color-mix(in srgb,var(--accent) 25%,transparent);border-top-color:var(--accent);animation:sp 1s linear infinite;flex:none}
+@keyframes sp{to{transform:rotate(360deg)}}
+.prog{height:3px;border-radius:2px;background:var(--fill);overflow:hidden;width:90px}
+.prog b{display:block;height:100%;width:62%;border-radius:2px;background:linear-gradient(90deg,var(--accent),#A58BFF)}
+
+/* 预览区 */
+.preview{padding:20px 22px 0;display:flex;flex-direction:column;gap:16px;min-width:0}
+.ph{display:flex;align-items:center;justify-content:space-between}
+.ph .l{display:flex;align-items:center;gap:9px}
+.ph .name{font-size:15px;font-weight:600;letter-spacing:.1px}
+.det{display:flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;color:var(--good);background:color-mix(in srgb,var(--good) 13%,transparent);padding:3px 9px;border-radius:999px}
+.det svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
+.ph .r{font-size:11.5px;color:var(--text-3)}
+.actions{display:flex;gap:8px;align-items:center}
+.btn{height:32px;padding:0 13px;border-radius:9px;display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:550;color:var(--text);background:var(--fill);border:0;font-family:inherit}
+.btn svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.btn.pri{background:var(--accent);color:var(--on-accent);box-shadow:0 4px 14px color-mix(in srgb,var(--accent) 38%,transparent)}
+.btn kbd{margin-left:2px}
+.card{background:var(--card);border:1px solid var(--card-border);border-radius:var(--r-card);box-shadow:0 1px 2px rgba(0,0,0,.03)}
+.code{font-family:var(--font-mono);font-size:13px;line-height:1.95;padding:14px 4px 14px 0;display:grid;grid-template-columns:38px 1fr;overflow:hidden}
+.code .ln{color:var(--text-3);text-align:right;padding-right:12px;user-select:none;white-space:pre}
+.code .tx{white-space:pre;color:var(--text)}
+.k{color:var(--j-key)}.s{color:var(--j-str)}.n{color:var(--j-num)}.bo{color:var(--j-bool)}.p{color:var(--j-punc)}
+.seg.mini{padding:2px}.seg.mini span{padding:4px 11px;font-size:12px;border-radius:7px}
+.facts{display:flex;gap:18px;font-size:11.5px;color:var(--text-2);align-items:center}
+.facts b{font-weight:600;color:var(--text)}
+.fact-dot{width:3px;height:3px;border-radius:50%;background:var(--text-3)}
+.colorcard{display:flex;align-items:center;gap:14px;padding:12px}
+.colorcard .big{width:64px;height:64px;border-radius:16px;background:linear-gradient(135deg,#7D8BFF,#5B6CFF 60%,#4A52EA);box-shadow:inset 0 0 0 1px rgba(255,255,255,.35),0 6px 18px rgba(91,108,255,.4)}
+.colorcard .vals{flex:1;display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-size:12px}
+.colorcard .vals span{color:var(--text-3)}
+.colorcard .vals code{font-family:var(--font-mono);font-size:12px;color:var(--text)}
+.sec-title{font-size:11.5px;font-weight:600;color:var(--text-3);letter-spacing:.3px}
+
+/* OCR 预览 */
+.shotbig{padding:16px;position:relative;overflow:hidden}
+.paper{background:var(--shot-bg);border-radius:10px;padding:18px 20px;box-shadow:0 1px 3px rgba(0,0,0,.12), 0 8px 24px rgba(0,0,0,.10);position:relative;height:300px;overflow:hidden}
+.paper h4{font-size:17px;color:var(--shot-title);font-weight:700;margin-bottom:10px}
+.paper p{font-size:13.5px;color:#4A4E5C;line-height:2.2}
+.hl{position:absolute;border:1.5px solid var(--accent);background:color-mix(in srgb,var(--accent) 14%,transparent);border-radius:5px}
+.ocrtext{padding:16px 18px;font-size:14px;line-height:2;color:var(--text)}
+.ocrtext mark{background:color-mix(in srgb,var(--accent) 22%,transparent);color:inherit;border-radius:4px;padding:0 2px}
+.langs{display:flex;gap:6px;align-items:center}
+.langs .chip-s{font-weight:550}
+
+/* 底部 */
+.foot{height:50px;border-top:1px solid var(--sep);display:flex;align-items:center;justify-content:space-between;padding:0 20px;background:color-mix(in srgb,var(--panel) 60%,transparent)}
+.keys{display:flex;gap:16px;color:var(--text-2);font-size:12px;align-items:center}
+.keys span{display:flex;align-items:center;gap:6px}
+kbd{font-family:var(--font-ui);font-size:11px;font-weight:600;color:var(--text-2);background:var(--kbd-bg);border:1px solid var(--kbd-border);border-bottom-width:1.5px;border-radius:6px;padding:1px 6px;min-width:20px;text-align:center;display:inline-block;line-height:1.5}
+.foot .r{font-size:11.5px;color:var(--text-3);display:flex;gap:8px;align-items:center}
+.theme-tag{position:absolute;right:42px;top:6px;font-size:10px;color:var(--text-3);display:none}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+ <defs>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></symbol>
+  <symbol id="i-text" viewBox="0 0 24 24"><path d="M5 7h14M5 12h14M5 17h9"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol>
+  <symbol id="i-img" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="3"/><circle cx="9" cy="10" r="1.4"/><path d="M4.5 17l4.5-4 3.5 3 3-2.2 4 3.2"/></symbol>
+  <symbol id="i-code" viewBox="0 0 24 24"><path d="M9 8l-4 4 4 4M15 8l4 4-4 4"/></symbol>
+  <symbol id="i-json" viewBox="0 0 24 24"><path d="M9 4.5C7 4.5 6.5 5.5 6.5 7v2c0 1.4-.8 2.6-2 3 1.2.4 2 1.6 2 3v2c0 1.5.5 2.5 2.5 2.5M15 4.5c2 0 2.5 1 2.5 2.5v2c0 1.4.8 2.6 2 3-1.2.4-2 1.6-2 3v2c0 1.5-.5 2.5-2.5 2.5"/></symbol>
+  <symbol id="i-sql" viewBox="0 0 24 24"><ellipse cx="12" cy="6.5" rx="7" ry="2.8"/><path d="M5 6.5v5.2c0 1.6 3.1 2.8 7 2.8s7-1.2 7-2.8V6.5M5 11.7v5.3c0 1.6 3.1 2.8 7 2.8s7-1.2 7-2.8v-5.3"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M9 4h6l-1 6 3 3H7l3-3-1-6zM12 13v7"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="6" y="11" width="12" height="9" rx="2.5"/><path d="M8.5 11V8a3.5 3.5 0 0 1 7 0v3"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2.8"/><path d="M5 15V7a2.5 2.5 0 0 1 2.5-2.5H15"/></symbol>
+  <symbol id="i-wand" viewBox="0 0 24 24"><path d="M5 19L15 9M14 4v3M12.5 5.5h3M19 11v3M17.5 12.5h3"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-ocr" viewBox="0 0 24 24"><path d="M4 8V6.5A2.5 2.5 0 0 1 6.5 4H8M16 4h1.5A2.5 2.5 0 0 1 20 6.5V8M20 16v1.5a2.5 2.5 0 0 1-2.5 2.5H16M8 20H6.5A2.5 2.5 0 0 1 4 17.5V16M8 10h8M8 14h5"/></symbol>
+  <symbol id="i-compress" viewBox="0 0 24 24"><path d="M5 9h14M5 15h14M9 5l-3 4 3 4M15 11l3 4-3 4"/></symbol>
+ </defs>
+</svg>
+
+<div class="ghost"><i style="top:30px;width:200px"></i><i style="top:58px;width:320px;background:rgba(255,140,200,.55)"></i><i style="top:86px;width:260px"></i><i style="top:114px;width:340px;background:rgba(80,200,255,.6)"></i></div>
+<div class="ghost2"></div>
+
+<main class="panel">
+  <div class="top">
+    <div class="search">
+      <svg><use href="#i-search"/></svg>
+      <div class="q"><span class="caret"></span><span class="hint" style="margin-left:6px">搜索剪贴板，或输入 type:json · type:color · ocr:会议</span></div>
+      <div class="privacy"><svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round"><use href="#i-lock"/></svg>仅本机</div>
+    </div>
+    <div class="tabs">
+      <div class="seg"><span class="on">全部 <em>128</em></span><span>文本 <em>52</em></span><span>链接 <em>21</em></span><span>图片 <em>17</em></span><span>代码 <em>38</em></span></div>
+      <div class="smart"><span class="chip-s">智能识别</span>已开启</div>
+    </div>
+  </div>
+
+  <div class="body">
+    <!-- 列表 -->
+    <section class="list">
+      <div class="grp">今天</div>
+
+      <div class="item" id="r-json">
+        <div class="tile t-json"><svg><use href="#i-json"/></svg></div>
+        <div class="meta"><div class="title mono">{"user":{"id":1024,"name":"hao"…</div>
+          <div class="sub"><span class="badge b-json">JSON</span>VS Code</div></div>
+        <div class="time">刚刚</div>
+      </div>
+
+      <div class="item">
+        <div class="swatch"></div>
+        <div class="meta"><div class="title mono">#5B6CFF</div>
+          <div class="sub">颜色 · rgb(91, 108, 255)</div></div>
+        <div class="time">1 分钟前</div>
+      </div>
+
+      <div class="item" id="r-ocr-run">
+        <div class="shot"><i></i><i></i><i style="width:80%"></i><i style="width:60%"></i></div>
+        <div class="meta"><div class="title">屏幕截图 · 1280×720</div>
+          <div class="sub"><span class="spin"></span>正在识别文字<span class="prog"><b></b></span></div></div>
+        <div class="time">2 分钟前</div>
+      </div>
+
+      <div class="item" id="r-ocr-done">
+        <div class="shot"><i></i><i></i><i style="width:80%"></i><i style="width:60%"></i></div>
+        <div class="meta"><div class="title">会议纪要 2026-10-02 · Q4 路线图…</div>
+          <div class="sub"><span class="badge b-ocr">OCR</span>已提取 128 字 · 简中 + 英</div></div>
+        <div class="time">8 分钟前</div>
+      </div>
+
+      <div class="item">
+        <div class="tile t-link"><svg><use href="#i-link"/></svg></div>
+        <div class="meta"><div class="title">v2.tauri.app/start/</div>
+          <div class="sub">链接 · Chrome</div></div>
+        <div class="time">15 分钟前</div>
+      </div>
+
+      <div class="item">
+        <div class="tile t-sql"><svg><use href="#i-sql"/></svg></div>
+        <div class="meta"><div class="title mono">SELECT id, kind FROM clips WHERE…</div>
+          <div class="sub"><span class="badge b-sql">SQL</span>DataGrip</div></div>
+        <div class="time">32 分钟前</div>
+      </div>
+
+      <div class="grp">昨天</div>
+
+      <div class="item">
+        <div class="tile t-text"><svg><use href="#i-text"/></svg></div>
+        <div class="meta"><div class="title">下午三点和设计评审，记得带上新版图标稿</div>
+          <div class="sub"><svg class="pin" viewBox="0 0 24 24"><use href="#i-pin"/></svg>已收藏 · 企业微信</div></div>
+        <div class="time">昨天</div>
+      </div>
+
+      <div class="item">
+        <div class="tile t-code"><svg><use href="#i-code"/></svg></div>
+        <div class="meta"><div class="title mono">const clips = ref&lt;Clip[]&gt;([])</div>
+          <div class="sub"><span class="badge b-ts">TS</span>Cursor</div></div>
+        <div class="time">昨天</div>
+      </div>
+
+      <div class="item">
+        <div class="tile t-link"><svg><use href="#i-link"/></svg></div>
+        <div class="meta"><div class="title">figma.com/design/Dogear-v2</div>
+          <div class="sub">链接 · Edge</div></div>
+        <div class="time">昨天</div>
+      </div>
+
+      <div class="item">
+        <div class="tile t-text"><svg><use href="#i-text"/></svg></div>
+        <div class="meta"><div class="title">您好，您的订单已发出，预计 2 日内送达</div>
+          <div class="sub">文本 · 客服工作台</div></div>
+        <div class="time">昨天</div>
+      </div>
+
+      <div class="item">
+        <div class="tile t-text"><svg><use href="#i-text"/></svg></div>
+        <div class="meta"><div class="title">收件地址：上海市浦东新区世纪大道 100 号</div>
+          <div class="sub">文本 · 微信</div></div>
+        <div class="time">周三</div>
+      </div>
+
+      <div class="item">
+        <div class="tile t-code"><svg><use href="#i-code"/></svg></div>
+        <div class="meta"><div class="title mono">git commit -m "feat: add ocr"</div>
+          <div class="sub"><span class="badge b-ts">SH</span>Windows Terminal</div></div>
+        <div class="time">周三</div>
+      </div>
+    </section>
+
+    <!-- 预览：由 JS-free 的 CSS 切换，两套版本放同一文件，用 body[data-view] 控制 -->
+    <section class="preview" id="pv-json">
+      <div class="ph">
+        <div class="l"><span class="name">JSON</span><span class="det"><svg viewBox="0 0 24 24"><use href="#i-check"/></svg>已识别 · 格式有效</span></div>
+        <div class="r">刚刚 · VS Code</div>
+      </div>
+      <div class="actions">
+        <div class="seg mini"><span class="on">格式化</span><span>压缩</span><span>原文</span></div>
+        <div style="flex:1"></div>
+        <button class="btn"><svg viewBox="0 0 24 24"><use href="#i-copy"/></svg>复制</button>
+        <button class="btn pri"><svg viewBox="0 0 24 24"><use href="#i-wand"/></svg>粘贴格式化<kbd style="background:rgba(255,255,255,.22);border-color:rgba(255,255,255,.3);color:#fff">⏎</kbd></button>
+      </div>
+      <div class="card code">
+<div class="ln">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15</div>
+<div class="tx"><span class="p">{</span>
+  <span class="k">"user"</span><span class="p">:</span> <span class="p">{</span>
+    <span class="k">"id"</span><span class="p">:</span> <span class="n">1024</span><span class="p">,</span>
+    <span class="k">"name"</span><span class="p">:</span> <span class="s">"hao"</span><span class="p">,</span>
+    <span class="k">"vip"</span><span class="p">:</span> <span class="bo">true</span><span class="p">,</span>
+    <span class="k">"tags"</span><span class="p">:</span> <span class="p">[</span><span class="s">"vue"</span><span class="p">,</span> <span class="s">"tauri"</span><span class="p">],</span>
+    <span class="k">"theme"</span><span class="p">:</span> <span class="p">{</span>
+      <span class="k">"accent"</span><span class="p">:</span> <span class="s">"#5B6CFF"</span><span class="p">,</span>
+      <span class="k">"radius"</span><span class="p">:</span> <span class="n">14</span>
+    <span class="p">}</span>
+  <span class="p">},</span>
+  <span class="k">"updatedAt"</span><span class="p">:</span> <span class="s">"2026-10-02T17:13:00+08:00"</span><span class="p">,</span>
+  <span class="k">"score"</span><span class="p">:</span> <span class="n">98.5</span>
+<span class="p">}</span></div>
+      </div>
+      <div class="facts"><span><b>15</b> 行</span><i class="fact-dot"></i><span>深度 <b>3</b></span><i class="fact-dot"></i><span><b>214</b> 字节</span><i class="fact-dot"></i><span>压缩后 <b>171</b> 字节</span></div>
+      <div class="sec-title">同时识别到</div>
+      <div class="card colorcard">
+        <div class="big"></div>
+        <div class="vals"><span>HEX</span><code>#5B6CFF</code><span>RGB</span><code>rgb(91, 108, 255)</code><span>HSL</span><code>hsl(234, 100%, 68%)</code></div>
+        <button class="btn"><svg viewBox="0 0 24 24"><use href="#i-copy"/></svg>复制 RGB</button>
+      </div>
+    </section>
+
+    <section class="preview" id="pv-ocr" style="display:none">
+      <div class="ph">
+        <div class="l"><span class="name">截图</span><span class="det"><svg viewBox="0 0 24 24"><use href="#i-ocr"/></svg>文字已提取</span></div>
+        <div class="r">8 分钟前 · 1280×720</div>
+      </div>
+      <div class="card shotbig">
+        <div class="paper">
+          <h4>会议纪要 2026-10-02</h4>
+          <p>1. Q4 路线图确认：OCR 与格式化功能优先上线<br>2. 设计评审定于周五下午三点，需带上图标稿<br>3. 负责人：Hao，截止日期 10 月 18 日<br>4. Next step: prepare the Windows beta build</p>
+          <div class="hl" style="left:16px;top:14px;width:196px;height:30px"></div>
+          <div class="hl" style="left:16px;top:56px;width:372px;height:26px"></div>
+          <div class="hl" style="left:16px;top:86px;width:330px;height:26px"></div>
+        </div>
+      </div>
+      <div class="actions">
+        <div class="langs"><span class="chip-s">简体中文</span><span class="chip-s">English</span></div>
+        <div style="flex:1"></div>
+        <button class="btn">重新识别</button>
+        <button class="btn pri"><svg viewBox="0 0 24 24"><use href="#i-copy"/></svg>复制文字<kbd style="background:rgba(255,255,255,.22);border-color:rgba(255,255,255,.3);color:#fff">Ctrl C</kbd></button>
+      </div>
+      <div class="sec-title">提取结果（可直接编辑）</div>
+      <div class="card ocrtext">会议纪要 2026-10-02<br>1. Q4 路线图确认：<mark>OCR 与格式化功能</mark>优先上线<br>2. 设计评审定于周五下午三点，需带上图标稿<br>3. 负责人：Hao，截止日期 10 月 18 日<br>4. Next step: prepare the Windows beta build</div>
+      <div class="facts"><span><b>128</b> 字</span><i class="fact-dot"></i><span>Windows 本机识别，图片不上传</span></div>
+    </section>
+  </div>
+
+  <footer class="foot">
+    <div class="keys">
+      <span><kbd>↑</kbd><kbd>↓</kbd>选择</span>
+      <span><kbd>⏎</kbd>粘贴</span>
+      <span><kbd>⇧⏎</kbd>纯文本</span>
+      <span><kbd>Ctrl F</kbd>格式化</span>
+      <span><kbd>Ctrl P</kbd>收藏</span>
+      <span><kbd>Esc</kbd>关闭</span>
+    </div>
+    <div class="r"><span class="chip-s" style="background:var(--fill);color:var(--text-2)">Alt V</span>128 条</div>
+  </footer>
+</main>
+
+<script>
+// 仅用于原型：通过 ?theme=dark&view=ocr 切换主题和选中项，不属于产品代码
+const q = new URLSearchParams(location.search);
+const theme = q.get('theme') || 'light';
+const view = q.get('view') || (theme === 'dark' ? 'ocr' : 'json');
+document.documentElement.dataset.theme = theme;
+document.getElementById(view === 'ocr' ? 'r-ocr-done' : 'r-json').classList.add('sel');
+document.getElementById('pv-json').style.display = view === 'ocr' ? 'none' : 'flex';
+document.getElementById('pv-ocr').style.display = view === 'ocr' ? 'flex' : 'none';
+</script>
+</body>
+</html>

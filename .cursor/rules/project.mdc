@@ -1,0 +1,21 @@
+---
+description: Dogear（折角）项目约定：架构边界、视觉 token、隐私与里程碑
+alwaysApply: true
+---
+
+# Dogear 项目约定
+
+这是 Dogear（折角），一个 Windows 剪切板工具，技术栈为 Tauri 2 + Vue 3 + TypeScript + SQLite。
+设计文档见 `docs/design.md`，开发时以其中的架构、数据模型、接口表、视觉规范（第 12 节）为准。
+
+- 前端只做展示与交互，系统能力与数据读写放在 `src-tauri` 的 Rust 模块里，通过 invoke 与事件通信。
+- 前端使用 Composition API、`<script setup lang="ts">`、Pinia。
+- Rust 代码按 watcher / paste / storage / settings / detect / ocr / effects 拆模块，每个模块保持小而清晰。
+- 默认不联网，不引入遥测；OCR 只使用本机能力（首选 Windows.Media.Ocr），不得调用云端服务。
+- 所有颜色、圆角、间距、阴影、动效时长必须来自 `src/styles/tokens.css` 的 CSS 变量，不要在组件里写死色值；必须同时支持浅色与深色。
+- 动画只使用 transform 与 opacity；尊重 `prefers-reduced-motion`；呼出聚焦输入不得等待动画。
+- 不使用或打包 SF Pro 等无再分发许可的字体；字体用系统栈（见设计文档 12.3）；图标使用 Lucide 或项目自绘 SVG。
+- 智能识别只增强不改写：原始内容原样保存；格式化结果仅用于预览与用户明确选择的“粘贴格式化”。
+- 文档里标注“需核对”的 API（Tauri 窗口特效、Windows.Media.Ocr、windows crate 的 feature、各插件名称）必须先查官方文档或实际编译验证，不要凭记忆编造；不确定时停下来说明。
+- 所有对剪切板内容的日志必须脱敏，不得把剪切板正文写入日志。
+- 每完成一个里程碑，先给出手动验证步骤再继续。
