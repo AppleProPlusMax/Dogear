@@ -5,6 +5,7 @@ mod ocr;
 mod panel;
 mod paste;
 mod state;
+mod tray;
 mod watcher;
 
 use std::sync::Mutex;
@@ -84,6 +85,9 @@ pub fn run() {
                 _ => {}
             });
 
+            if let Err(err) = tray::install(app.handle()) {
+                eprintln!("托盘图标创建失败: {err}");
+            }
             register_shortcut(app.handle())?;
             watcher::start(app.handle().clone());
             Ok(())

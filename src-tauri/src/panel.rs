@@ -64,6 +64,13 @@ pub fn toggle(app: &AppHandle) {
     show(app, &window);
 }
 
+pub fn open(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    show(app, &window);
+}
+
 pub fn hide(app: &AppHandle) {
     set_escape(app, false);
     if let Some(window) = app.get_webview_window("main") {
