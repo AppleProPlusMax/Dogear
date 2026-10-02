@@ -4,13 +4,14 @@ use std::thread;
 
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
-use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_WINDOW_CORNER_PREFERENCE,
     DWMWCP_ROUND,
 };
 use windows::Win32::Graphics::Gdi::SetWindowRgn;
-use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetForegroundWindow};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetForegroundWindow, GetWindowRect};
 
 use crate::paste;
 use crate::state::{self, AppState};
@@ -117,6 +118,69 @@ pub fn apply_system_corners(window: &tauri::WebviewWindow) {
 pub fn hide_panel(app: AppHandle) -> Result<(), String> {
     hide(&app);
     Ok(())
+}
+
+/// 拖动开始前由前端调用。Windows 用标题栏拖动时会先 ReleaseCapture，窗口会误报失焦。
+#[tauri::command]
+pub fn arm_window_drag(state: State<'_, Mutex<AppState>>) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+    guard.drag_blur_until = state::now_ms() + 800;
+    Ok(())
+}
+
+pub fn drag_blur_active(state: &Mutex<AppState>) -> bool {
+    let until = state
+        .lock()
+        .map(|guard| guard.drag_blur_until)
+        .unwrap_or(0);
+    state::now_ms() < until
+}
+
+/// 鼠标还按在窗口里：失焦是拖动，不是点到了别的程序。
+pub fn pointer_is_dragging(window: &tauri::WebviewWindow) -> bool {
+    if !left_button_down() {
+        return false;
+    }
+    let Ok(raw) = window.hwnd() else {
+        return false;
+    };
+    let mut rect = RECT::default();
+    if unsafe { GetWindowRect(HWND(raw.0), &mut rect) }.is_err() {
+        return false;
+    }
+    let mut point = POINT::default();
+    if unsafe { GetCursorPos(&mut point) }.is_err() {
+        return false;
+    }
+    point.x >= rect.left
+        && point.x < rect.right
+        && point.y >= rect.top
+        && point.y < rect.bottom
+}
+
+/// 拖动结束后把焦点还给面板，否则之后点外面不会再触发隐藏。
+pub fn refocus_after_drag(app: AppHandle) {
+    thread::spawn(move || {
+        let start = state::now_ms();
+        while left_button_down() && state::now_ms() - start < 30_000 {
+            thread::sleep(std::time::Duration::from_millis(16));
+        }
+        thread::sleep(std::time::Duration::from_millis(32));
+        let Some(window) = app.get_webview_window("main") else {
+            return;
+        };
+        if !window.is_visible().unwrap_or(false) {
+            return;
+        }
+        if let Ok(hwnd) = window.hwnd() {
+            unsafe { paste::focus_window(HWND(hwnd.0)) };
+        }
+        let _ = window.set_focus();
+    });
+}
+
+fn left_button_down() -> bool {
+    unsafe { GetAsyncKeyState(i32::from(VK_LBUTTON.0)) < 0 }
 }
 
 #[tauri::command]

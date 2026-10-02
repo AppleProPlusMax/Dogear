@@ -1,4 +1,5 @@
 mod clipboard;
+mod detect;
 mod effects;
 mod ocr;
 mod panel;
@@ -30,6 +31,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             panel::list_clips,
             panel::hide_panel,
+            panel::arm_window_drag,
             paste::copy_clip,
             paste::paste_clip,
             get_effect_state,
@@ -62,6 +64,14 @@ pub fn run() {
                     };
                     let until = state.lock().map(|guard| guard.ignore_blur_until).unwrap_or(0);
                     if state::now_ms() < until {
+                        return;
+                    }
+                    let dragging = panel::drag_blur_active(&state)
+                        || blur_handle
+                            .get_webview_window("main")
+                            .is_some_and(|window| panel::pointer_is_dragging(&window));
+                    if dragging {
+                        panel::refocus_after_drag(blur_handle.clone());
                         return;
                     }
                     panel::hide(&blur_handle);

@@ -27,6 +27,7 @@
   --kbd-border: rgba(60, 60, 67, 0.14);
   --tile-text: #5b6cff;
   --tile-link: #0a84ff;
+  --tile-code: #8e5bff;
   --good: #1fa971;
   color-scheme: light;
 }
@@ -54,6 +55,7 @@
     --kbd-border: rgba(255, 255, 255, 0.14);
     --tile-text: #8f9cff;
     --tile-link: #4da3ff;
+    --tile-code: #b08cff;
     --good: #4bd694;
     color-scheme: dark;
   }

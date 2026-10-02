@@ -4,6 +4,8 @@ export interface Clip {
   id: number;
   content: string;
   createdAt: number;
+  kind: "text" | "link" | "code";
+  language: string | null;
 }
 
 export interface EffectState {
@@ -28,6 +30,10 @@ export function copyClip(id: number): Promise<void> {
 
 export function hidePanel(): Promise<void> {
   return invoke("hide_panel");
+}
+
+export function armWindowDrag(): Promise<void> {
+  return invoke("arm_window_drag");
 }
 
 export function getEffectState(): Promise<EffectState> {

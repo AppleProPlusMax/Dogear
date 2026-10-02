@@ -1,10 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { copyClip, getEffectState, hidePanel, listClips, pasteClip, type Clip } from "./api";
+import { armWindowDrag, copyClip, getEffectState, hidePanel, listClips, pasteClip, type Clip } from "./api";
 
 type FilterId = "all" | "text" | "link" | "image" | "code";
-type Kind = "text" | "link";
 
 const filters: { id: FilterId; label: string }[] = [
   { id: "all", label: "全部" },
@@ -22,14 +21,25 @@ const notice = ref("");
 const searchEl = ref<HTMLInputElement | null>(null);
 let unlisten: UnlistenFn[] = [];
 
-function kindOf(content: string): Kind {
-  const text = content.trim();
-  if (/^https?:\/\/\S+$/i.test(text) || /^www\.\S+$/i.test(text)) return "link";
-  return "text";
-}
+const languageNames: Record<string, string> = {
+  js: "JS",
+  ts: "TS",
+  python: "Python",
+  shell: "Shell",
+  html: "HTML",
+  css: "CSS",
+  rust: "Rust",
+  go: "Go",
+  java: "Java",
+  json: "JSON",
+  sql: "SQL",
+  other: "代码",
+};
 
-function kindLabel(kind: Kind) {
-  return kind === "link" ? "链接" : "文本";
+function kindLabel(clip: Clip) {
+  if (clip.kind === "link") return "链接";
+  if (clip.kind === "code") return languageNames[clip.language ?? "other"] ?? "代码";
+  return "文本";
 }
 
 const searched = computed(() => {
@@ -40,14 +50,14 @@ const searched = computed(() => {
 
 function countOf(id: FilterId) {
   if (id === "all") return searched.value.length;
-  if (id === "image" || id === "code") return 0;
-  return searched.value.filter((clip) => kindOf(clip.content) === id).length;
+  if (id === "image") return 0;
+  return searched.value.filter((clip) => clip.kind === id).length;
 }
 
 const filtered = computed(() => {
   if (filter.value === "all") return searched.value;
-  if (filter.value === "image" || filter.value === "code") return [];
-  return searched.value.filter((clip) => kindOf(clip.content) === filter.value);
+  if (filter.value === "image") return [];
+  return searched.value.filter((clip) => clip.kind === filter.value);
 });
 
 const current = computed(() => filtered.value[selected.value] ?? null);
@@ -118,6 +128,29 @@ function onEscape(event: KeyboardEvent) {
   void hidePanel();
 }
 
+function dragWouldStart(event: MouseEvent) {
+  if (event.button !== 0 || event.detail > 2) return false;
+  const path = event.composedPath();
+  for (const node of path) {
+    if (!(node instanceof HTMLElement)) continue;
+    const attr = node.getAttribute("data-tauri-drag-region");
+    const blocksDrag =
+      node.matches("input, button, a, select, textarea, label, summary")
+      || node.getAttribute("role") === "tab";
+    if (blocksDrag && attr === null) return false;
+    if (attr === null) continue;
+    if (attr === "false") return false;
+    if (attr === "deep") return true;
+    return node === path[0];
+  }
+  return false;
+}
+
+function onDragPointerDown(event: MouseEvent) {
+  if (!dragWouldStart(event)) return;
+  void armWindowDrag();
+}
+
 function firstLine(content: string) {
   const line = content.split(/\r?\n/).find((item) => item.trim()) ?? "";
   return line.trim();
@@ -155,6 +188,7 @@ watch(selected, () => {
 onMounted(async () => {
   window.addEventListener("keydown", onEscape, true);
   if (!("__TAURI_INTERNALS__" in window)) return;
+  window.addEventListener("mousedown", onDragPointerDown, true);
   await Promise.all([
     refresh(),
     getEffectState().then((effect) => {
@@ -178,18 +212,21 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener("keydown", onEscape, true);
+  window.removeEventListener("mousedown", onDragPointerDown, true);
   for (const stop of unlisten) stop();
 });
 </script>
 
 <template>
   <main class="panel" @keydown="onKeydown">
-    <header class="top">
+    <header class="top" data-tauri-drag-region>
       <div class="search" data-tauri-drag-region>
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <circle cx="11" cy="11" r="6.5" />
-          <path d="M16 16l4.5 4.5" />
-        </svg>
+        <span class="search-icon" data-tauri-drag-region>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="11" cy="11" r="6.5" />
+            <path d="M16 16l4.5 4.5" />
+          </svg>
+        </span>
         <input
           ref="searchEl"
           v-model="query"
@@ -198,7 +235,7 @@ onUnmounted(() => {
           spellcheck="false"
           @input="selected = 0"
         />
-        <div class="privacy">
+        <div class="privacy" data-tauri-drag-region>
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <rect x="6" y="11" width="12" height="9" rx="2.5" />
             <path d="M8.5 11V8a3.5 3.5 0 0 1 7 0v3" />
@@ -206,7 +243,7 @@ onUnmounted(() => {
           仅本机
         </div>
       </div>
-      <div class="tabs">
+      <div class="tabs" data-tauri-drag-region>
         <div class="seg" role="tablist">
           <button
             v-for="item in filters"
@@ -236,18 +273,22 @@ onUnmounted(() => {
             @click="selected = item.index"
             @dblclick="pasteSelected"
           >
-            <span class="tile" :class="kindOf(item.clip.content)">
-              <svg v-if="kindOf(item.clip.content) === 'link'" viewBox="0 0 24 24">
+            <span class="tile" :class="item.clip.kind">
+              <svg v-if="item.clip.kind === 'link'" viewBox="0 0 24 24">
                 <path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1" />
                 <path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" />
+              </svg>
+              <svg v-else-if="item.clip.kind === 'code'" viewBox="0 0 24 24">
+                <path d="M9 8L5 12l4 4" />
+                <path d="M15 8l4 4-4 4" />
               </svg>
               <svg v-else viewBox="0 0 24 24">
                 <path d="M5 7h14M5 12h14M5 17h9" />
               </svg>
             </span>
             <span class="meta">
-              <span class="title" :class="{ mono: kindOf(item.clip.content) === 'link' }">{{ firstLine(item.clip.content) }}</span>
-              <span class="sub">{{ kindLabel(kindOf(item.clip.content)) }} · {{ item.clip.content.length }} 字</span>
+              <span class="title" :class="{ mono: item.clip.kind !== 'text' }">{{ firstLine(item.clip.content) }}</span>
+              <span class="sub">{{ kindLabel(item.clip) }} · {{ item.clip.content.length }} 字</span>
             </span>
             <span class="time">{{ relativeTime(item.clip.createdAt) }}</span>
           </button>
@@ -260,14 +301,14 @@ onUnmounted(() => {
 
       <section v-if="current" class="preview">
         <div class="ph">
-          <div class="name">{{ kindLabel(kindOf(current.content)) }}</div>
+          <div class="name">{{ kindLabel(current) }}</div>
           <div class="when">{{ relativeTime(current.createdAt) }}</div>
         </div>
         <div class="actions">
           <button type="button" class="btn" @click="copySelected">复制</button>
           <button type="button" class="btn pri" @click="pasteSelected">粘贴</button>
         </div>
-        <div class="card" :class="{ mono: kindOf(current.content) === 'link' }">{{ current.content }}</div>
+        <div class="card" :class="{ mono: current.kind !== 'text' }">{{ current.content }}</div>
         <div class="facts">
           <span><b>{{ lineCount(current.content) }}</b> 行</span>
           <i></i>
@@ -306,6 +347,12 @@ onUnmounted(() => {
 }
 .top {
   padding: 18px 20px 0;
+  cursor: grab;
+}
+.search-icon {
+  display: flex;
+  flex: none;
+  cursor: grab;
 }
 .search {
   height: 46px;
@@ -329,6 +376,7 @@ onUnmounted(() => {
 .search input {
   -webkit-app-region: no-drag;
   app-region: no-drag;
+  cursor: text;
   flex: 1;
   min-width: 0;
   height: 100%;
@@ -343,6 +391,7 @@ onUnmounted(() => {
   color: var(--text-3);
 }
 .privacy {
+  cursor: grab;
   display: flex;
   align-items: center;
   gap: 5px;
@@ -362,6 +411,7 @@ onUnmounted(() => {
 }
 .tabs {
   margin: 14px 0 12px;
+  cursor: grab;
 }
 .seg {
   display: inline-flex;
@@ -395,11 +445,15 @@ onUnmounted(() => {
 .body {
   flex: 1;
   min-height: 0;
+  min-width: 0;
+  overflow: hidden;
   display: grid;
-  grid-template-columns: 340px 1fr;
+  grid-template-columns: 340px minmax(0, 1fr);
   border-top: 1px solid var(--sep);
 }
 .list {
+  min-height: 0;
+  min-width: 0;
   overflow: auto;
   padding: 6px 8px 12px;
   border-right: 1px solid var(--sep);
@@ -453,6 +507,10 @@ onUnmounted(() => {
   color: var(--tile-link);
   background: color-mix(in srgb, var(--tile-link) 14%, transparent);
 }
+.tile.code {
+  color: var(--tile-code);
+  background: color-mix(in srgb, var(--tile-code) 14%, transparent);
+}
 .tile svg {
   width: 18px;
   height: 18px;
@@ -502,6 +560,8 @@ onUnmounted(() => {
 }
 .preview {
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   padding: 18px 20px 12px;
   display: flex;
   flex-direction: column;
@@ -543,6 +603,7 @@ onUnmounted(() => {
   min-height: 0;
   overflow: auto;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-word;
   background: var(--card);
   border: 1px solid var(--card-border);

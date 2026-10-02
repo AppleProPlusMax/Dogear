@@ -90,10 +90,13 @@ fn on_clipboard(app: &AppHandle) {
                 guard.clips.retain(|clip| clip.id != id);
                 guard.clips.insert(0, updated);
             } else {
+                let detected = crate::detect::classify(&text);
                 let clip = crate::state::Clip {
                     id: guard.next_id,
                     content: text,
                     created_at: now,
+                    kind: detected.kind.to_string(),
+                    language: detected.language.map(str::to_string),
                 };
                 guard.next_id += 1;
                 guard.clips.insert(0, clip);
@@ -101,9 +104,13 @@ fn on_clipboard(app: &AppHandle) {
                     guard.clips.truncate(200);
                 }
             }
-            let chars = guard.clips.first().map(|clip| clip.content.chars().count()).unwrap_or(0);
+            let (chars, kind) = guard
+                .clips
+                .first()
+                .map(|clip| (clip.content.chars().count(), clip.kind.clone()))
+                .unwrap_or((0, "text".into()));
             drop(guard);
-            eprintln!("已记录剪切板文本，长度 {chars} 字");
+            eprintln!("已记录剪切板文本，长度 {chars} 字，类型 {kind}");
             let _ = app.emit("clip-added", ());
         }
         ClipboardRead::Ignored => {
