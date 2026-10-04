@@ -11,7 +11,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WNDCLASSW,
 };
 
-use crate::clipboard::{self, ClipboardRead, ImageData};
+use crate::clipboard::{self, ClipboardRead};
 use crate::state::{self, AppState, Clip};
 
 static APP: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
@@ -111,7 +111,7 @@ fn on_clipboard(app: &AppHandle) {
             eprintln!("已记录剪切板文本，长度 {chars} 字，类型 {kind}");
             let _ = app.emit("clip-added", ());
         }
-        ClipboardRead::Image(image) => on_image(app, image),
+        ClipboardRead::Image(image) => record_image(app, &image.png, &image.hash),
         ClipboardRead::Ignored => {
             eprintln!("已跳过一条剪切板内容（敏感标记或超出长度上限），未记录正文");
         }
@@ -119,8 +119,8 @@ fn on_clipboard(app: &AppHandle) {
     }
 }
 
-fn on_image(app: &AppHandle, image: ImageData) {
-    if clipboard::is_self_image(&image.hash) {
+pub(crate) fn record_image(app: &AppHandle, png: &[u8], hash: &str) {
+    if clipboard::is_self_image(hash) {
         return;
     }
     let Some(state) = app.try_state::<Mutex<AppState>>() else {
@@ -136,7 +136,7 @@ fn on_image(app: &AppHandle, image: ImageData) {
         if let Some(existing) = guard
             .clips
             .iter_mut()
-            .find(|clip| clip.hash.as_deref() == Some(image.hash.as_str()))
+            .find(|clip| clip.hash.as_deref() == Some(hash))
         {
             existing.created_at = now;
             let updated = existing.clone();
@@ -150,7 +150,7 @@ fn on_image(app: &AppHandle, image: ImageData) {
         }
     }
 
-    let saved = match crate::images::save(app, &image.png, &image.hash) {
+    let saved = match crate::images::save(app, png, hash) {
         Ok(saved) => saved,
         Err(err) => {
             eprintln!("剪切板图片落盘失败: {err}");
@@ -173,7 +173,7 @@ fn on_image(app: &AppHandle, image: ImageData) {
             language: None,
             file_path: Some(saved.path.to_string_lossy().into_owned()),
             thumb_path: Some(saved.thumb_path.to_string_lossy().into_owned()),
-            hash: Some(image.hash),
+            hash: Some(hash.to_string()),
             width: Some(saved.width),
             height: Some(saved.height),
             ocr_status: "pending".into(),

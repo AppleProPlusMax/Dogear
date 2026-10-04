@@ -1,3 +1,4 @@
+mod capture;
 mod clipboard;
 mod detect;
 mod effects;
@@ -12,7 +13,7 @@ mod watcher;
 use std::sync::Mutex;
 
 use tauri::{Manager, WindowEvent};
-use tauri_plugin_global_shortcut::{Code, Modifiers, ShortcutState};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, ShortcutState};
 
 use crate::state::AppState;
 
@@ -39,6 +40,7 @@ pub fn run() {
             panel::retry_ocr,
             paste::copy_clip,
             paste::paste_clip,
+            capture::start_capture,
             get_effect_state,
             ocr_image
         ])
@@ -120,6 +122,8 @@ fn register_shortcut(app: &tauri::AppHandle) -> tauri::Result<()> {
             }
             if shortcut.matches(Modifiers::ALT, Code::KeyV) {
                 panel::toggle(app);
+            } else if shortcut.matches(Modifiers::ALT, Code::KeyC) {
+                capture::begin(app);
             } else if shortcut.matches(Modifiers::empty(), Code::Escape) {
                 panel::hide(app);
             }
@@ -132,6 +136,10 @@ fn register_shortcut(app: &tauri::AppHandle) -> tauri::Result<()> {
             let _ = window.show();
             let _ = window.set_focus();
         }
+        return Ok(());
+    }
+    if let Err(err) = app.global_shortcut().register("Alt+C") {
+        eprintln!("Alt+C 注册失败: {err}。截图仍可从标签栏的按钮开始。");
     }
     Ok(())
 }

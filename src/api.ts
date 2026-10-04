@@ -48,6 +48,10 @@ export function retryOcr(id: number): Promise<void> {
   return invoke("retry_ocr", { id });
 }
 
+export function startCapture(): Promise<void> {
+  return invoke("start_capture");
+}
+
 export function hidePanel(): Promise<void> {
   return invoke("hide_panel");
 }

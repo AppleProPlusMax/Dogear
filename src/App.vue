@@ -9,6 +9,7 @@ import {
   getEffectState,
   hidePanel,
   listClips,
+  startCapture,
   pasteClip,
   retryOcr,
   type Clip,
@@ -212,6 +213,12 @@ function onKeydown(event: KeyboardEvent) {
   }
 }
 
+function captureScreen() {
+  void startCapture().catch((err) => {
+    notice.value = err instanceof Error ? err.message : String(err);
+  });
+}
+
 function onEscape(event: KeyboardEvent) {
   if (event.key !== "Escape") return;
   if (!("__TAURI_INTERNALS__" in window)) return;
@@ -353,6 +360,14 @@ onUnmounted(() => {
             {{ item.label }} <em>{{ countOf(item.id) }}</em>
           </button>
         </div>
+        <button type="button" class="capture" @click="captureScreen">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 3H5a2 2 0 0 0-2 2v2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2" />
+            <circle cx="12" cy="12" r="3.2" />
+          </svg>
+          截图
+          <kbd>Alt</kbd><kbd>C</kbd>
+        </button>
       </div>
     </header>
 
@@ -429,7 +444,7 @@ onUnmounted(() => {
             <img v-if="currentImage" :src="currentImage" :alt="imageSize(current)" />
             <p v-else>图片读取中…</p>
           </div>
-          <div class="ocr">
+          <div class="ocr" :class="{ filled: currentText }">
             <div class="ocr-head">
               <span :class="{ ok: current.ocrStatus === 'done' }">
                 {{ ocrLabel(current) }}
@@ -560,6 +575,42 @@ onUnmounted(() => {
 .tabs {
   margin: 14px 0 12px;
   cursor: grab;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.capture {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  cursor: pointer;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  padding: 0 8px 0 11px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--seg-thumb);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 0 0 1.5px var(--accent), 0 6px 16px var(--accent-ring);
+}
+.capture svg {
+  width: 15px;
+  height: 15px;
+  stroke: var(--accent);
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.capture kbd {
+  padding: 0 5px;
+  line-height: 18px;
 }
 .seg {
   display: inline-flex;
@@ -775,35 +826,43 @@ onUnmounted(() => {
   padding: 0;
   cursor: pointer;
 }
-/* 图片预览：先按原比例放进剩余空间，再把识别文字接在下面。 */
+/* 图片按原比例完整放进剩余空间。百分比高度在网格里经常算不成，
+   图片会按宽度撑开后被上下裁掉，所以改成绝对定位再 object-fit。 */
 .shotbox {
-  flex: 1;
+  flex: 1 1 0;
   min-height: 0;
-  display: grid;
-  place-items: center;
+  position: relative;
   overflow: hidden;
   background: var(--card);
   border: 1px solid var(--card-border);
   border-radius: var(--r-card);
-  padding: 10px;
   color: var(--text-3);
 }
 .shotbox img {
-  max-width: 100%;
-  max-height: 100%;
+  position: absolute;
+  inset: 10px;
+  width: calc(100% - 20px);
+  height: calc(100% - 20px);
   object-fit: contain;
   border-radius: 6px;
 }
 .shotbox p {
   margin: 0;
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
   font-size: 12px;
 }
 .ocr {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+.ocr.filled {
+  flex: 1 1 0;
 }
 .ocr-head {
   display: flex;
@@ -817,8 +876,8 @@ onUnmounted(() => {
   color: var(--good);
 }
 .ocr .card {
-  flex: 0 1 auto;
-  max-height: 32vh;
+  flex: 1 1 0;
+  min-height: 0;
   padding: 10px 12px;
   line-height: 1.6;
 }
