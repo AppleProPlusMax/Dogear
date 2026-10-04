@@ -17,19 +17,47 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::clipboard;
 use crate::state::AppState;
 
-#[tauri::command]
-pub fn copy_clip(state: State<'_, Mutex<AppState>>, id: i64) -> Result<(), String> {
-    let content = {
-        let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
-        guard
-            .clips
-            .iter()
-            .find(|clip| clip.id == id)
-            .ok_or("记录不存在")?
-            .content
+/// 图片条目放原图，其余放原文。`as_text` 为真时图片放识别出的文字。
+enum Payload {
+    Text(String),
+    Image { png: Vec<u8>, hash: String },
+}
+
+fn payload(state: &State<'_, Mutex<AppState>>, id: i64, as_text: bool) -> Result<Payload, String> {
+    let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+    let clip = guard
+        .clips
+        .iter()
+        .find(|clip| clip.id == id)
+        .ok_or("记录不存在")?;
+    if clip.kind != "image" {
+        return Ok(Payload::Text(clip.content.clone()));
+    }
+    if as_text {
+        let text = clip
+            .ocr_text
             .clone()
-    };
-    clipboard::write_text(&content)
+            .filter(|text| !text.trim().is_empty())
+            .ok_or("这张图还没有识别出文字")?;
+        return Ok(Payload::Text(text));
+    }
+    let path = clip.file_path.clone().ok_or("这条记录没有图片")?;
+    let hash = clip.hash.clone().ok_or("这条记录没有图片")?;
+    drop(guard);
+    let png = std::fs::read(&path).map_err(|err| format!("无法读取图片: {err}"))?;
+    Ok(Payload::Image { png, hash })
+}
+
+fn write_payload(payload: &Payload) -> Result<(), String> {
+    match payload {
+        Payload::Text(text) => clipboard::write_text(text),
+        Payload::Image { png, hash } => clipboard::write_image(png, hash),
+    }
+}
+
+#[tauri::command]
+pub fn copy_clip(state: State<'_, Mutex<AppState>>, id: i64, as_text: bool) -> Result<(), String> {
+    write_payload(&payload(&state, id, as_text)?)
 }
 
 #[tauri::command]
@@ -37,18 +65,15 @@ pub fn paste_clip(
     app: AppHandle,
     state: State<'_, Mutex<AppState>>,
     id: i64,
+    as_text: bool,
 ) -> Result<(), String> {
-    let (content, hwnd) = {
+    let payload = payload(&state, id, as_text)?;
+    let hwnd = {
         let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
-        let clip = guard
-            .clips
-            .iter()
-            .find(|clip| clip.id == id)
-            .ok_or("记录不存在")?;
-        (clip.content.clone(), guard.previous_hwnd)
+        guard.previous_hwnd
     };
 
-    clipboard::write_text(&content)?;
+    write_payload(&payload)?;
     crate::panel::hide(&app);
 
     if hwnd == 0 {

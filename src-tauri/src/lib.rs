@@ -1,6 +1,7 @@
 mod clipboard;
 mod detect;
 mod effects;
+mod images;
 mod ocr;
 mod panel;
 mod paste;
@@ -33,6 +34,9 @@ pub fn run() {
             panel::list_clips,
             panel::hide_panel,
             panel::arm_window_drag,
+            panel::clip_image,
+            panel::clip_thumb,
+            panel::retry_ocr,
             paste::copy_clip,
             paste::paste_clip,
             get_effect_state,
@@ -89,6 +93,7 @@ pub fn run() {
                 eprintln!("托盘图标创建失败: {err}");
             }
             register_shortcut(app.handle())?;
+            ocr::start_queue(app.handle().clone());
             watcher::start(app.handle().clone());
             Ok(())
         })

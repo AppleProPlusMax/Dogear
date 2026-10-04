@@ -196,6 +196,58 @@ pub fn list_clips(state: State<'_, Mutex<AppState>>) -> Result<Vec<crate::state:
     Ok(guard.clips.clone())
 }
 
+/// 图片原图的 data URL。路径不交给前端，避免 webview 直接访问文件系统。
+#[tauri::command]
+pub fn clip_image(state: State<'_, Mutex<AppState>>, id: i64) -> Result<String, String> {
+    let path = clip_file(&state, id, false)?;
+    crate::images::read_as_data_url(&path)
+}
+
+#[tauri::command]
+pub fn clip_thumb(state: State<'_, Mutex<AppState>>, id: i64) -> Result<String, String> {
+    let path = clip_file(&state, id, true)?;
+    crate::images::read_as_data_url(&path)
+}
+
+/// 手动重新识别（Ctrl+O 或预览区按钮）。
+#[tauri::command]
+pub fn retry_ocr(state: State<'_, Mutex<AppState>>, id: i64) -> Result<(), String> {
+    {
+        let mut guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+        let clip = guard
+            .clips
+            .iter_mut()
+            .find(|clip| clip.id == id)
+            .ok_or("记录不存在")?;
+        if clip.kind != "image" {
+            return Err("只有图片可以识别文字".into());
+        }
+        clip.ocr_status = "pending".into();
+        clip.ocr_text = None;
+    }
+    crate::ocr::enqueue(id);
+    Ok(())
+}
+
+fn clip_file(
+    state: &State<'_, Mutex<AppState>>,
+    id: i64,
+    thumb: bool,
+) -> Result<std::path::PathBuf, String> {
+    let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+    let clip = guard
+        .clips
+        .iter()
+        .find(|clip| clip.id == id)
+        .ok_or("记录不存在")?;
+    let path = if thumb {
+        clip.thumb_path.as_ref()
+    } else {
+        clip.file_path.as_ref()
+    };
+    path.map(std::path::PathBuf::from).ok_or_else(|| "这条记录没有图片".into())
+}
+
 fn position_near_cursor(window: &tauri::WebviewWindow) {
     let mut point = POINT::default();
     if unsafe { GetCursorPos(&mut point) }.is_err() {

@@ -11,8 +11,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WNDCLASSW,
 };
 
-use crate::clipboard::{self, ClipboardRead};
-use crate::state::{self, AppState};
+use crate::clipboard::{self, ClipboardRead, ImageData};
+use crate::state::{self, AppState, Clip};
 
 static APP: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
 
@@ -91,18 +91,16 @@ fn on_clipboard(app: &AppHandle) {
                 guard.clips.insert(0, updated);
             } else {
                 let detected = crate::detect::classify(&text);
-                let clip = crate::state::Clip {
-                    id: guard.next_id,
-                    content: text,
-                    created_at: now,
-                    kind: detected.kind.to_string(),
-                    language: detected.language.map(str::to_string),
-                };
+                let clip = Clip::text(
+                    guard.next_id,
+                    text,
+                    now,
+                    detected.kind.to_string(),
+                    detected.language.map(str::to_string),
+                );
                 guard.next_id += 1;
                 guard.clips.insert(0, clip);
-                if guard.clips.len() > 200 {
-                    guard.clips.truncate(200);
-                }
+                truncate(&mut guard);
             }
             let (chars, kind) = guard
                 .clips
@@ -113,9 +111,86 @@ fn on_clipboard(app: &AppHandle) {
             eprintln!("已记录剪切板文本，长度 {chars} 字，类型 {kind}");
             let _ = app.emit("clip-added", ());
         }
+        ClipboardRead::Image(image) => on_image(app, image),
         ClipboardRead::Ignored => {
             eprintln!("已跳过一条剪切板内容（敏感标记或超出长度上限），未记录正文");
         }
         ClipboardRead::Empty => {}
+    }
+}
+
+fn on_image(app: &AppHandle, image: ImageData) {
+    if clipboard::is_self_image(&image.hash) {
+        return;
+    }
+    let Some(state) = app.try_state::<Mutex<AppState>>() else {
+        return;
+    };
+    let now = state::now_ms();
+
+    // 同一张图再复制一次：挪到最前，识别结果直接复用。
+    {
+        let Ok(mut guard) = state.lock() else {
+            return;
+        };
+        if let Some(existing) = guard
+            .clips
+            .iter_mut()
+            .find(|clip| clip.hash.as_deref() == Some(image.hash.as_str()))
+        {
+            existing.created_at = now;
+            let updated = existing.clone();
+            let id = updated.id;
+            guard.clips.retain(|clip| clip.id != id);
+            guard.clips.insert(0, updated);
+            drop(guard);
+            eprintln!("剪切板图片已存在，挪到最前");
+            let _ = app.emit("clip-added", ());
+            return;
+        }
+    }
+
+    let saved = match crate::images::save(app, &image.png, &image.hash) {
+        Ok(saved) => saved,
+        Err(err) => {
+            eprintln!("剪切板图片落盘失败: {err}");
+            return;
+        }
+    };
+
+    let Ok(mut guard) = state.lock() else {
+        return;
+    };
+    let id = guard.next_id;
+    guard.next_id += 1;
+    guard.clips.insert(
+        0,
+        Clip {
+            id,
+            content: String::new(),
+            created_at: now,
+            kind: "image".into(),
+            language: None,
+            file_path: Some(saved.path.to_string_lossy().into_owned()),
+            thumb_path: Some(saved.thumb_path.to_string_lossy().into_owned()),
+            hash: Some(image.hash),
+            width: Some(saved.width),
+            height: Some(saved.height),
+            ocr_status: "pending".into(),
+            ocr_text: None,
+            ocr_lang: None,
+        },
+    );
+    truncate(&mut guard);
+    drop(guard);
+
+    eprintln!("已记录剪切板图片，{}×{}", saved.width, saved.height);
+    let _ = app.emit("clip-added", ());
+    crate::ocr::enqueue(id);
+}
+
+fn truncate(guard: &mut AppState) {
+    if guard.clips.len() > 200 {
+        guard.clips.truncate(200);
     }
 }

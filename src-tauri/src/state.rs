@@ -10,6 +10,40 @@ pub struct Clip {
     pub created_at: i64,
     pub kind: String,
     pub language: Option<String>,
+    /// 图片原图的本地路径，文本条目为空。
+    #[serde(skip)]
+    pub file_path: Option<String>,
+    #[serde(skip)]
+    pub thumb_path: Option<String>,
+    /// 图片内容哈希，用于去重。
+    #[serde(skip)]
+    pub hash: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// none / pending / done / empty / failed
+    pub ocr_status: String,
+    pub ocr_text: Option<String>,
+    pub ocr_lang: Option<String>,
+}
+
+impl Clip {
+    pub fn text(id: i64, content: String, created_at: i64, kind: String, language: Option<String>) -> Self {
+        Self {
+            id,
+            content,
+            created_at,
+            kind,
+            language,
+            file_path: None,
+            thumb_path: None,
+            hash: None,
+            width: None,
+            height: None,
+            ocr_status: "none".into(),
+            ocr_text: None,
+            ocr_lang: None,
+        }
+    }
 }
 
 pub struct AppState {

@@ -28,6 +28,7 @@
   --tile-text: #5b6cff;
   --tile-link: #0a84ff;
   --tile-code: #8e5bff;
+  --tile-image: #ff8a3d;
   --good: #1fa971;
   color-scheme: light;
 }
@@ -56,6 +57,7 @@
     --tile-text: #8f9cff;
     --tile-link: #4da3ff;
     --tile-code: #b08cff;
+    --tile-image: #ffa05e;
     --good: #4bd694;
     color-scheme: dark;
   }

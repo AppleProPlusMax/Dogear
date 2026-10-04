@@ -1,7 +1,18 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { armWindowDrag, copyClip, getEffectState, hidePanel, listClips, pasteClip, type Clip } from "./api";
+import {
+  armWindowDrag,
+  clipImage,
+  clipThumb,
+  copyClip,
+  getEffectState,
+  hidePanel,
+  listClips,
+  pasteClip,
+  retryOcr,
+  type Clip,
+} from "./api";
 
 type FilterId = "all" | "text" | "link" | "image" | "code";
 
@@ -19,6 +30,9 @@ const filter = ref<FilterId>("all");
 const selected = ref(0);
 const notice = ref("");
 const searchEl = ref<HTMLInputElement | null>(null);
+/// 图片以 data URL 取回，按条目缓存，避免每次切换选中都重新读盘。
+const thumbs = ref<Record<number, string>>({});
+const fullImages = ref<Record<number, string>>({});
 let unlisten: UnlistenFn[] = [];
 
 const languageNames: Record<string, string> = {
@@ -38,25 +52,53 @@ const languageNames: Record<string, string> = {
 
 function kindLabel(clip: Clip) {
   if (clip.kind === "link") return "链接";
+  if (clip.kind === "image") return "图片";
   if (clip.kind === "code") return languageNames[clip.language ?? "other"] ?? "代码";
   return "文本";
+}
+
+function imageSize(clip: Clip) {
+  if (!clip.width || !clip.height) return "图片";
+  return `${clip.width} × ${clip.height}`;
+}
+
+/// 图片的副标题承担状态提示，所以识别中、失败这些都显示在这里。
+function ocrLabel(clip: Clip) {
+  if (clip.ocrStatus === "pending") return "正在识别文字";
+  if (clip.ocrStatus === "failed") return "识别失败，可重试";
+  if (clip.ocrStatus === "empty") return "未识别到文字";
+  if (clip.ocrStatus === "done") return `已提取 ${(clip.ocrText ?? "").length} 字`;
+  return "";
+}
+
+function itemTitle(clip: Clip) {
+  if (clip.kind !== "image") return firstLine(clip.content);
+  return imageSize(clip);
+}
+
+function itemSub(clip: Clip) {
+  if (clip.kind !== "image") return `${kindLabel(clip)} · ${clip.content.length} 字`;
+  const status = ocrLabel(clip);
+  return status ? `图片 · ${status}` : "图片";
 }
 
 const searched = computed(() => {
   const q = query.value.trim().toLowerCase();
   if (!q) return clips.value;
-  return clips.value.filter((clip) => clip.content.toLowerCase().includes(q));
+  return clips.value.filter(
+    (clip) =>
+      clip.content.toLowerCase().includes(q)
+      || (clip.ocrText ?? "").toLowerCase().includes(q),
+  );
 });
 
 function countOf(id: FilterId) {
   if (id === "all") return searched.value.length;
-  if (id === "image") return 0;
   return searched.value.filter((clip) => clip.kind === id).length;
 }
 
 const filtered = computed(() => {
   if (filter.value === "all") return searched.value;
-  if (filter.value === "image") return [];
   return searched.value.filter((clip) => clip.kind === filter.value);
 });
 
@@ -76,30 +118,77 @@ const groups = computed(() => {
 async function refresh() {
   clips.value = await listClips();
   if (selected.value >= filtered.value.length) selected.value = 0;
+  void loadThumbs();
+  void loadFullImage();
 }
 
-function focusSearch() {
-  nextTick(() => searchEl.value?.focus());
+async function loadThumbs() {
+  for (const clip of clips.value) {
+    if (clip.kind !== "image" || thumbs.value[clip.id]) continue;
+    try {
+      thumbs.value[clip.id] = await clipThumb(clip.id);
+    } catch {
+      // 缩略图缺失时退回到类型图标，不打扰用户。
+    }
+  }
 }
 
-async function pasteSelected() {
+async function loadFullImage() {
   const clip = current.value;
-  if (!clip) return;
-  notice.value = "";
+  if (!clip || clip.kind !== "image" || fullImages.value[clip.id]) return;
   try {
-    await pasteClip(clip.id);
+    fullImages.value[clip.id] = await clipImage(clip.id);
   } catch (err) {
     notice.value = err instanceof Error ? err.message : String(err);
   }
 }
 
-async function copySelected() {
+const currentImage = computed(() => {
+  const clip = current.value;
+  if (!clip || clip.kind !== "image") return "";
+  return fullImages.value[clip.id] ?? thumbs.value[clip.id] ?? "";
+});
+
+const currentText = computed(() => {
+  const clip = current.value;
+  if (!clip) return "";
+  return clip.kind === "image" ? clip.ocrText ?? "" : clip.content;
+});
+
+function focusSearch() {
+  nextTick(() => searchEl.value?.focus());
+}
+
+async function pasteSelected(asText = false) {
   const clip = current.value;
   if (!clip) return;
   notice.value = "";
   try {
-    await copyClip(clip.id);
-    notice.value = "已复制";
+    await pasteClip(clip.id, asText);
+  } catch (err) {
+    notice.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+async function copySelected(asText = false) {
+  const clip = current.value;
+  if (!clip) return;
+  notice.value = "";
+  try {
+    await copyClip(clip.id, asText);
+    notice.value = asText ? "已复制文字" : "已复制";
+  } catch (err) {
+    notice.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+async function recognizeSelected() {
+  const clip = current.value;
+  if (!clip || clip.kind !== "image") return;
+  notice.value = "";
+  try {
+    await retryOcr(clip.id);
+    await refresh();
   } catch (err) {
     notice.value = err instanceof Error ? err.message : String(err);
   }
@@ -116,7 +205,10 @@ function onKeydown(event: KeyboardEvent) {
     selected.value = (selected.value - 1 + filtered.value.length) % filtered.value.length;
   } else if (event.key === "Enter") {
     event.preventDefault();
-    void pasteSelected();
+    void pasteSelected(event.shiftKey);
+  } else if (event.key === "o" && event.ctrlKey) {
+    event.preventDefault();
+    void recognizeSelected();
   }
 }
 
@@ -180,6 +272,7 @@ function lineCount(content: string) {
 }
 
 watch(selected, () => {
+  void loadFullImage();
   nextTick(() => {
     document.querySelector(".item.on")?.scrollIntoView({ block: "nearest" });
   });
@@ -197,6 +290,9 @@ onMounted(async () => {
   ]);
   unlisten = [
     await listen("clip-added", () => {
+      void refresh();
+    }),
+    await listen("ocr-updated", () => {
       void refresh();
     }),
     await listen("window-shown", () => {
@@ -271,9 +367,12 @@ onUnmounted(() => {
             class="item"
             :class="{ on: item.index === selected }"
             @click="selected = item.index"
-            @dblclick="pasteSelected"
+            @dblclick="pasteSelected($event.shiftKey)"
           >
-            <span class="tile" :class="item.clip.kind">
+            <span v-if="thumbs[item.clip.id]" class="tile shot">
+              <img :src="thumbs[item.clip.id]" alt="" />
+            </span>
+            <span v-else class="tile" :class="item.clip.kind">
               <svg v-if="item.clip.kind === 'link'" viewBox="0 0 24 24">
                 <path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1" />
                 <path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" />
@@ -282,20 +381,28 @@ onUnmounted(() => {
                 <path d="M9 8L5 12l4 4" />
                 <path d="M15 8l4 4-4 4" />
               </svg>
+              <svg v-else-if="item.clip.kind === 'image'" viewBox="0 0 24 24">
+                <rect x="4" y="5" width="16" height="14" rx="2.5" />
+                <circle cx="9" cy="10" r="1.6" />
+                <path d="M5 17l4.5-4.5 3.5 3.5 2.5-2.5L19 17" />
+              </svg>
               <svg v-else viewBox="0 0 24 24">
                 <path d="M5 7h14M5 12h14M5 17h9" />
               </svg>
             </span>
             <span class="meta">
-              <span class="title" :class="{ mono: item.clip.kind !== 'text' }">{{ firstLine(item.clip.content) }}</span>
-              <span class="sub">{{ kindLabel(item.clip) }} · {{ item.clip.content.length }} 字</span>
+              <span class="title" :class="{ mono: item.clip.kind === 'link' || item.clip.kind === 'code' }">{{ itemTitle(item.clip) }}</span>
+              <span class="sub">
+                {{ itemSub(item.clip) }}
+                <i v-if="item.clip.ocrStatus === 'pending'" class="spin" aria-hidden="true"></i>
+              </span>
             </span>
             <span class="time">{{ relativeTime(item.clip.createdAt) }}</span>
           </button>
         </template>
       </section>
       <section v-else class="list empty">
-        <p v-if="clips.length === 0">还没有记录。复制一段文字后再按 Alt+V。</p>
+        <p v-if="clips.length === 0">还没有记录。复制一段文字或截一张图后再按 Alt+V。</p>
         <p v-else>没有匹配的记录。</p>
       </section>
 
@@ -304,16 +411,56 @@ onUnmounted(() => {
           <div class="name">{{ kindLabel(current) }}</div>
           <div class="when">{{ relativeTime(current.createdAt) }}</div>
         </div>
-        <div class="actions">
-          <button type="button" class="btn" @click="copySelected">复制</button>
-          <button type="button" class="btn pri" @click="pasteSelected">粘贴</button>
-        </div>
-        <div class="card" :class="{ mono: current.kind !== 'text' }">{{ current.content }}</div>
-        <div class="facts">
-          <span><b>{{ lineCount(current.content) }}</b> 行</span>
-          <i></i>
-          <span><b>{{ current.content.length }}</b> 字</span>
-        </div>
+
+        <template v-if="current.kind === 'image'">
+          <div class="actions">
+            <button type="button" class="btn" @click="copySelected()">复制图片</button>
+            <button
+              type="button"
+              class="btn"
+              :disabled="current.ocrStatus !== 'done'"
+              @click="copySelected(true)"
+            >
+              复制文字
+            </button>
+            <button type="button" class="btn pri" @click="pasteSelected()">粘贴</button>
+          </div>
+          <div class="shotbox">
+            <img v-if="currentImage" :src="currentImage" :alt="imageSize(current)" />
+            <p v-else>图片读取中…</p>
+          </div>
+          <div class="ocr">
+            <div class="ocr-head">
+              <span :class="{ ok: current.ocrStatus === 'done' }">
+                {{ ocrLabel(current) }}
+                <template v-if="current.ocrStatus === 'done' && current.ocrLang">
+                  · {{ current.ocrLang }}
+                </template>
+              </span>
+              <button type="button" class="link" @click="recognizeSelected">重新识别</button>
+            </div>
+            <div v-if="currentText" class="card">{{ currentText }}</div>
+          </div>
+          <div class="facts">
+            <span><b>{{ current.width ?? 0 }}</b> × <b>{{ current.height ?? 0 }}</b> 像素</span>
+            <i></i>
+            <span><b>{{ currentText.length }}</b> 字</span>
+          </div>
+        </template>
+
+        <template v-else>
+          <div class="actions">
+            <button type="button" class="btn" @click="copySelected()">复制</button>
+            <button type="button" class="btn pri" @click="pasteSelected()">粘贴</button>
+          </div>
+          <div class="card" :class="{ mono: current.kind !== 'text' }">{{ current.content }}</div>
+          <div class="facts">
+            <span><b>{{ lineCount(current.content) }}</b> 行</span>
+            <i></i>
+            <span><b>{{ current.content.length }}</b> 字</span>
+          </div>
+        </template>
+
         <p v-if="notice" class="notice">{{ notice }}</p>
       </section>
       <section v-else class="preview quiet">
@@ -325,6 +472,7 @@ onUnmounted(() => {
       <div class="keys">
         <span><kbd>↑</kbd><kbd>↓</kbd> 选择</span>
         <span><kbd>Enter</kbd> 粘贴</span>
+        <span><kbd>Shift</kbd><kbd>Enter</kbd> 粘贴文字</span>
         <span><kbd>Esc</kbd> 关闭</span>
       </div>
       <div class="count">Alt+V · {{ clips.length }} 条</div>
@@ -511,6 +659,21 @@ onUnmounted(() => {
   color: var(--tile-code);
   background: color-mix(in srgb, var(--tile-code) 14%, transparent);
 }
+.tile.image {
+  color: var(--tile-image);
+  background: color-mix(in srgb, var(--tile-image) 14%, transparent);
+}
+.tile.shot {
+  overflow: hidden;
+  background: var(--fill);
+  box-shadow: inset 0 0 0 1px var(--card-border);
+}
+.tile.shot img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
 .tile svg {
   width: 18px;
   height: 18px;
@@ -597,6 +760,88 @@ onUnmounted(() => {
 .btn.pri {
   background: var(--accent);
   color: var(--on-accent);
+}
+.btn:disabled {
+  color: var(--text-3);
+  cursor: default;
+}
+.link {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 550;
+  padding: 0;
+  cursor: pointer;
+}
+/* 图片预览：先按原比例放进剩余空间，再把识别文字接在下面。 */
+.shotbox {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-card);
+  padding: 10px;
+  color: var(--text-3);
+}
+.shotbox img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 6px;
+}
+.shotbox p {
+  margin: 0;
+  font-size: 12px;
+}
+.ocr {
+  flex: 0 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ocr-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text-2);
+  font-size: 11.5px;
+}
+.ocr-head .ok {
+  color: var(--good);
+}
+.ocr .card {
+  flex: 0 1 auto;
+  max-height: 32vh;
+  padding: 10px 12px;
+  line-height: 1.6;
+}
+.spin {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-left: 5px;
+  vertical-align: -1px;
+  border: 1.5px solid var(--accent-ring);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: none;
+  }
 }
 .card {
   flex: 1;
