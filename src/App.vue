@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import markUrl from "../src-tauri/icons/128x128.png";
 import {
   armWindowDrag,
   clipImage,
@@ -323,6 +324,10 @@ onUnmounted(() => {
 <template>
   <main class="panel" @keydown="onKeydown">
     <header class="top" data-tauri-drag-region>
+      <div class="brand" data-tauri-drag-region>
+        <img :src="markUrl" alt="" />
+        <span>Dogear</span>
+      </div>
       <div class="search" data-tauri-drag-region>
         <span class="search-icon" data-tauri-drag-region>
           <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -509,8 +514,31 @@ onUnmounted(() => {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
 }
 .top {
-  padding: 18px 20px 0;
+  padding: 14px 20px 0;
   cursor: grab;
+}
+.brand {
+  height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  cursor: grab;
+}
+.brand img,
+.brand span {
+  pointer-events: none;
+}
+.brand img {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: block;
+}
+.brand span {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
 }
 .search-icon {
   display: flex;
