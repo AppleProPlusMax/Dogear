@@ -76,9 +76,24 @@ pub fn hide(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }
+    crate::settings::abort_shortcut_capture(app);
+}
+
+pub fn open_settings(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if !window.is_visible().unwrap_or(false) {
+        present(app, &window, false);
+    }
+    let _ = app.emit("open-settings", ());
 }
 
 fn show(app: &AppHandle, window: &tauri::WebviewWindow) {
+    present(app, window, true);
+}
+
+fn present(app: &AppHandle, window: &tauri::WebviewWindow, announce_history: bool) {
     if let Some(state) = app.try_state::<Mutex<AppState>>() {
         capture_foreground(&state);
         if let Ok(mut guard) = state.lock() {
@@ -93,7 +108,9 @@ fn show(app: &AppHandle, window: &tauri::WebviewWindow) {
     let _ = window.set_focus();
     apply_system_corners(window);
     set_escape(app, true);
-    let _ = app.emit("window-shown", ());
+    if announce_history {
+        let _ = app.emit("window-shown", ());
+    }
 }
 
 /// 交给 Windows 11 画圆角。半径与 `tokens.css` 的 `--r-panel: 8px` 对齐。

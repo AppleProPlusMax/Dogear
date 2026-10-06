@@ -63,3 +63,33 @@ export function armWindowDrag(): Promise<void> {
 export function getEffectState(): Promise<EffectState> {
   return invoke("get_effect_state");
 }
+
+export type ThemePreference = "system" | "light" | "dark";
+
+export interface Settings {
+  summonShortcut: string;
+  captureShortcut: string;
+  launchAtLogin: boolean;
+  pauseRecording: boolean;
+  theme: ThemePreference;
+  reduceTransparency: boolean;
+  ocrAuto: boolean;
+}
+
+export type SettingsPatch = Partial<Settings>;
+
+export function getSettings(): Promise<Settings> {
+  return invoke("get_settings");
+}
+
+export function updateSettings(patch: SettingsPatch): Promise<Settings> {
+  return invoke("update_settings", { patch });
+}
+
+export function beginShortcutCapture(): Promise<void> {
+  return invoke("begin_shortcut_capture");
+}
+
+export function endShortcutCapture(): Promise<void> {
+  return invoke("end_shortcut_capture");
+}

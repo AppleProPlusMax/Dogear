@@ -42,7 +42,7 @@ extern "system" {
     fn RtlGetVersion(info: *mut OsVersionInfo) -> i32;
 }
 
-pub fn apply(window: &WebviewWindow) -> EffectState {
+pub fn apply(window: &WebviewWindow, reduce_transparency: bool) -> EffectState {
     let build = windows_build();
     let transparency = transparency_enabled();
     let high_contrast = high_contrast_enabled();
@@ -57,7 +57,16 @@ pub fn apply(window: &WebviewWindow) -> EffectState {
     if high_contrast {
         let _ = clear_effects(window);
         return EffectState {
+            effect: "opaque".into(),
             detail: "系统高对比度模式，使用纯色".into(),
+            ..base
+        };
+    }
+    if reduce_transparency {
+        let _ = clear_effects(window);
+        return EffectState {
+            effect: "opaque".into(),
+            detail: "已开启减少透明效果，使用纯色".into(),
             ..base
         };
     }

@@ -2,6 +2,8 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import markUrl from "../src-tauri/icons/128x128.png";
+import { useSettingsStore } from "./stores/settings";
+import SettingsView from "./views/SettingsView.vue";
 import {
   armWindowDrag,
   clipImage,
@@ -26,6 +28,8 @@ const filters: { id: FilterId; label: string }[] = [
   { id: "code", label: "代码" },
 ];
 
+const settingsStore = useSettingsStore();
+const view = ref<"history" | "settings">("history");
 const clips = ref<Clip[]>([]);
 const query = ref("");
 const filter = ref<FilterId>("all");
@@ -220,8 +224,18 @@ function captureScreen() {
   });
 }
 
+function showHistory() {
+  view.value = "history";
+  focusSearch();
+}
+
+function shortcutParts(shortcut: string) {
+  return shortcut.split("+").filter(Boolean);
+}
+
 function onEscape(event: KeyboardEvent) {
   if (event.key !== "Escape") return;
+  if (settingsStore.capturing) return;
   if (!("__TAURI_INTERNALS__" in window)) return;
   event.preventDefault();
   event.stopPropagation();
@@ -304,11 +318,18 @@ onMounted(async () => {
       void refresh();
     }),
     await listen("window-shown", () => {
+      view.value = "history";
       query.value = "";
       filter.value = "all";
       selected.value = 0;
       notice.value = "";
       focusSearch();
+    }),
+    await listen("open-settings", () => {
+      view.value = "settings";
+    }),
+    await listen<{ effect: string }>("effect-changed", (event) => {
+      document.documentElement.dataset.effect = event.payload.effect;
     }),
   ];
   focusSearch();
@@ -322,11 +343,18 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <main class="panel" @keydown="onKeydown">
+  <SettingsView v-if="view === 'settings'" @back="showHistory" />
+  <main v-else class="panel" @keydown="onKeydown">
     <header class="top" data-tauri-drag-region>
       <div class="brand" data-tauri-drag-region>
         <img :src="markUrl" alt="" />
         <span>Dogear</span>
+        <button type="button" class="gear" aria-label="设置" @click="view = 'settings'">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+          </svg>
+        </button>
       </div>
       <div class="search" data-tauri-drag-region>
         <span class="search-icon" data-tauri-drag-region>
@@ -371,10 +399,12 @@ onUnmounted(() => {
             <circle cx="12" cy="12" r="3.2" />
           </svg>
           截图
-          <kbd>Alt</kbd><kbd>C</kbd>
+          <kbd v-for="part in shortcutParts(settingsStore.settings.captureShortcut)" :key="part">{{ part }}</kbd>
         </button>
       </div>
     </header>
+
+    <p v-if="settingsStore.settings.pauseRecording" class="paused">记录已暂停，新的复制不会写入历史。</p>
 
     <div class="body">
       <section v-if="filtered.length" class="list">
@@ -422,7 +452,7 @@ onUnmounted(() => {
         </template>
       </section>
       <section v-else class="list empty">
-        <p v-if="clips.length === 0">还没有记录。复制一段文字或截一张图后再按 Alt+V。</p>
+        <p v-if="clips.length === 0">还没有记录。复制一段文字或截一张图后再按 {{ settingsStore.settings.summonShortcut }}。</p>
         <p v-else>没有匹配的记录。</p>
       </section>
 
@@ -495,7 +525,7 @@ onUnmounted(() => {
         <span><kbd>Shift</kbd><kbd>Enter</kbd> 粘贴文字</span>
         <span><kbd>Esc</kbd> 关闭</span>
       </div>
-      <div class="count">Alt+V · {{ clips.length }} 条</div>
+      <div class="count">{{ settingsStore.settings.summonShortcut }} · {{ clips.length }} 条</div>
     </footer>
   </main>
 </template>
@@ -539,6 +569,42 @@ onUnmounted(() => {
   font-size: 15px;
   font-weight: 650;
   letter-spacing: -0.02em;
+}
+.gear {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  margin-left: auto;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.gear:hover {
+  background: var(--fill);
+  color: var(--text);
+}
+.gear svg {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.paused {
+  margin: 0 20px 8px;
+  padding: 8px 10px;
+  border-radius: var(--r-ctl);
+  background: var(--fill);
+  color: var(--text-2);
+  font-size: 12px;
 }
 .search-icon {
   display: flex;

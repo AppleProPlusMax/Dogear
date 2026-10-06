@@ -1,6 +1,7 @@
 use serde::Serialize;
 
 use crate::effects::EffectState;
+use crate::settings::Settings;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,6 +55,9 @@ pub struct AppState {
     /// 顶部空白处开始拖动后的一小段时间。这段里的失焦来自系统拖动，不是点到了外面。
     pub drag_blur_until: i64,
     pub effect: EffectState,
+    pub settings: Settings,
+    /// 正在录制新快捷键。这段时间里用户快捷键先卸掉，避免按下时把窗口关掉。
+    pub shortcut_capture: bool,
 }
 
 impl Default for AppState {
@@ -65,6 +69,8 @@ impl Default for AppState {
             ignore_blur_until: 0,
             drag_blur_until: 0,
             effect: EffectState::unknown(),
+            settings: Settings::default(),
+            shortcut_capture: false,
         }
     }
 }

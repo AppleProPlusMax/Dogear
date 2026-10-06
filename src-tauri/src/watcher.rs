@@ -71,6 +71,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
 }
 
 fn on_clipboard(app: &AppHandle) {
+    if recording_paused(app) {
+        return;
+    }
     match clipboard::read() {
         ClipboardRead::Text(text) => {
             if clipboard::is_self_write(&text) {
@@ -162,6 +165,7 @@ pub(crate) fn record_image(app: &AppHandle, png: &[u8], hash: &str) {
         return;
     };
     let id = guard.next_id;
+    let ocr_auto = guard.settings.ocr_auto;
     guard.next_id += 1;
     guard.clips.insert(
         0,
@@ -176,7 +180,7 @@ pub(crate) fn record_image(app: &AppHandle, png: &[u8], hash: &str) {
             hash: Some(hash.to_string()),
             width: Some(saved.width),
             height: Some(saved.height),
-            ocr_status: "pending".into(),
+            ocr_status: if ocr_auto { "pending" } else { "none" }.into(),
             ocr_text: None,
             ocr_lang: None,
         },
@@ -186,7 +190,15 @@ pub(crate) fn record_image(app: &AppHandle, png: &[u8], hash: &str) {
 
     eprintln!("已记录剪切板图片，{}×{}", saved.width, saved.height);
     let _ = app.emit("clip-added", ());
-    crate::ocr::enqueue(id);
+    if ocr_auto {
+        crate::ocr::enqueue(id);
+    }
+}
+
+fn recording_paused(app: &AppHandle) -> bool {
+    app.try_state::<Mutex<AppState>>()
+        .and_then(|state| state.lock().ok().map(|guard| guard.settings.pause_recording))
+        .unwrap_or(false)
 }
 
 fn truncate(guard: &mut AppState) {

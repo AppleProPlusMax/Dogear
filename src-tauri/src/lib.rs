@@ -6,6 +6,7 @@ mod images;
 mod ocr;
 mod panel;
 mod paste;
+mod settings;
 mod state;
 mod tray;
 mod watcher;
@@ -13,8 +14,9 @@ mod watcher;
 use std::sync::Mutex;
 
 use tauri::{Manager, WindowEvent};
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, ShortcutState};
+use tauri_plugin_global_shortcut::ShortcutState;
 
+use crate::settings::Settings;
 use crate::state::AppState;
 
 #[tauri::command]
@@ -28,9 +30,34 @@ fn ocr_image(path: String) -> Result<ocr::OcrReport, String> {
     ocr::recognize_png(std::path::Path::new(&path))
 }
 
+#[tauri::command]
+fn get_settings(state: tauri::State<'_, Mutex<AppState>>) -> Result<Settings, String> {
+    let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+    Ok(guard.settings.clone())
+}
+
+#[tauri::command]
+fn update_settings(app: tauri::AppHandle, patch: settings::SettingsPatch) -> Result<Settings, String> {
+    settings::update(&app, patch)
+}
+
+#[tauri::command]
+fn begin_shortcut_capture(app: tauri::AppHandle) -> Result<(), String> {
+    settings::begin_shortcut_capture(&app)
+}
+
+#[tauri::command]
+fn end_shortcut_capture(app: tauri::AppHandle) -> Result<(), String> {
+    settings::end_shortcut_capture(&app)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .invoke_handler(tauri::generate_handler![
             panel::list_clips,
             panel::hide_panel,
@@ -42,13 +69,18 @@ pub fn run() {
             paste::paste_clip,
             capture::start_capture,
             get_effect_state,
+            get_settings,
+            update_settings,
+            begin_shortcut_capture,
+            end_shortcut_capture,
             ocr_image
         ])
         .setup(|app| {
             let window = app
                 .get_webview_window("main")
                 .ok_or("缺少主窗口 main")?;
-            let effect = effects::apply(&window);
+            let loaded = settings::load();
+            let effect = effects::apply(&window, loaded.reduce_transparency);
             panel::apply_system_corners(&window);
             eprintln!(
                 "窗口效果: {}（build {}，透明 {}，高对比度 {}）{}",
@@ -60,8 +92,10 @@ pub fn run() {
             );
             app.manage(Mutex::new(AppState {
                 effect,
+                settings: loaded.clone(),
                 ..AppState::default()
             }));
+            settings::sync_launch(app.handle(), loaded.launch_at_login);
 
             let blur_handle = app.handle().clone();
             window.on_window_event(move |event| match event {
@@ -104,42 +138,35 @@ pub fn run() {
 }
 
 fn register_shortcut(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let builder = match tauri_plugin_global_shortcut::Builder::new().with_shortcuts(["Alt+V"]) {
-        Ok(builder) => builder,
-        Err(err) => {
-            eprintln!("Alt+V 注册失败: {err}。窗口将直接显示，便于继续验证界面。");
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
-            return Ok(());
-        }
-    };
-    let plugin = builder
+    let plugin = tauri_plugin_global_shortcut::Builder::new()
         .with_handler(|app, shortcut, event| {
             if event.state != ShortcutState::Pressed {
                 return;
             }
-            if shortcut.matches(Modifiers::ALT, Code::KeyV) {
-                panel::toggle(app);
-            } else if shortcut.matches(Modifiers::ALT, Code::KeyC) {
-                capture::begin(app);
-            } else if shortcut.matches(Modifiers::empty(), Code::Escape) {
-                panel::hide(app);
-            }
+            settings::on_global_shortcut(app, shortcut);
         })
         .build();
 
     if let Err(err) = app.plugin(plugin) {
-        eprintln!("Alt+V 注册失败: {err}。窗口将直接显示，便于继续验证界面。");
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.show();
-            let _ = window.set_focus();
-        }
+        eprintln!("全局快捷键加载失败: {err}。窗口将直接显示，便于继续验证界面。");
+        reveal_window(app);
         return Ok(());
     }
-    if let Err(err) = app.global_shortcut().register("Alt+C") {
-        eprintln!("Alt+C 注册失败: {err}。截图仍可从标签栏的按钮开始。");
+    let configured = app
+        .state::<Mutex<AppState>>()
+        .lock()
+        .map(|guard| guard.settings.clone())
+        .unwrap_or_default();
+    if let Err(err) = settings::register_user_shortcuts(app, &configured) {
+        eprintln!("快捷键注册失败: {err}。窗口将直接显示，便于继续验证界面。");
+        reveal_window(app);
     }
     Ok(())
+}
+
+fn reveal_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }
