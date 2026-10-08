@@ -58,9 +58,13 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            panel::open(app);
+        }))
         .invoke_handler(tauri::generate_handler![
             panel::list_clips,
             panel::hide_panel,
+            panel::minimize_panel,
             panel::arm_window_drag,
             panel::clip_image,
             panel::clip_thumb,
@@ -96,14 +100,33 @@ pub fn run() {
                 ..AppState::default()
             }));
             settings::sync_launch(app.handle(), loaded.launch_at_login);
+            panel::apply_auto_hide(app.handle(), loaded.auto_hide);
+            if !loaded.guide_seen {
+                panel::open(app.handle());
+            }
 
             let blur_handle = app.handle().clone();
             window.on_window_event(move |event| match event {
+                WindowEvent::Focused(true) => {
+                    let Some(window) = blur_handle.get_webview_window("main") else {
+                        return;
+                    };
+                    if window.is_minimized().unwrap_or(false) {
+                        return;
+                    }
+                    panel::hold_escape(&blur_handle);
+                }
                 WindowEvent::Focused(false) => {
                     let Some(state) = blur_handle.try_state::<Mutex<AppState>>() else {
                         return;
                     };
-                    let until = state.lock().map(|guard| guard.ignore_blur_until).unwrap_or(0);
+                    let (until, auto_hide) = state
+                        .lock()
+                        .map(|guard| (guard.ignore_blur_until, guard.settings.auto_hide))
+                        .unwrap_or((0, false));
+                    if !auto_hide {
+                        return;
+                    }
                     if state::now_ms() < until {
                         return;
                     }

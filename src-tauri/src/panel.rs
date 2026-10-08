@@ -46,6 +46,11 @@ fn set_escape(app: &AppHandle, enabled: bool) {
     });
 }
 
+/// 窗口重新得到焦点（例如从任务栏还原）时重新占用 Esc。
+pub fn hold_escape(app: &AppHandle) {
+    set_escape(app, true);
+}
+
 pub fn capture_foreground(state: &Mutex<AppState>) {
     let hwnd = unsafe { GetForegroundWindow() };
     if let Ok(mut guard) = state.lock() {
@@ -57,6 +62,10 @@ pub fn toggle(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
+    if window.is_minimized().unwrap_or(false) {
+        restore_minimized(app, &window);
+        return;
+    }
     if window.is_visible().unwrap_or(false) {
         hide(app);
         return;
@@ -64,11 +73,32 @@ pub fn toggle(app: &AppHandle) {
     show(app, &window);
 }
 
+/// 再次启动、托盘「打开」都走这里：已经显示就只聚焦，缩在任务栏里就还原，不会再藏起来。
 pub fn open(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
+    if window.is_minimized().unwrap_or(false) {
+        restore_minimized(app, &window);
+        return;
+    }
+    if window.is_visible().unwrap_or(false) {
+        focus_existing(app, &window);
+        return;
+    }
     show(app, &window);
+}
+
+/// 关掉自动隐藏时窗口进任务栏、不再置顶。重新打开时若正缩在任务栏，先收回托盘，避免任务栏按钮消失后窗口出不来。
+pub fn apply_auto_hide(app: &AppHandle, auto_hide: bool) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if auto_hide && window.is_minimized().unwrap_or(false) {
+        hide(app);
+    }
+    let _ = window.set_always_on_top(auto_hide);
+    let _ = window.set_skip_taskbar(auto_hide);
 }
 
 pub fn hide(app: &AppHandle) {
@@ -83,7 +113,9 @@ pub fn open_settings(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
-    if !window.is_visible().unwrap_or(false) {
+    if window.is_minimized().unwrap_or(false) {
+        restore_minimized(app, &window);
+    } else if !window.is_visible().unwrap_or(false) {
         present(app, &window, false);
     }
     let _ = app.emit("open-settings", ());
@@ -93,18 +125,42 @@ fn show(app: &AppHandle, window: &tauri::WebviewWindow) {
     present(app, window, true);
 }
 
-fn present(app: &AppHandle, window: &tauri::WebviewWindow, announce_history: bool) {
+fn restore_minimized(app: &AppHandle, window: &tauri::WebviewWindow) {
+    arm_blur_grace(app);
+    let _ = window.unminimize();
+    let _ = window.show();
+    focus_window(window);
+    let _ = window.set_focus();
+    set_escape(app, true);
+}
+
+fn focus_existing(app: &AppHandle, window: &tauri::WebviewWindow) {
+    arm_blur_grace(app);
+    focus_window(window);
+    let _ = window.set_focus();
+    set_escape(app, true);
+}
+
+fn arm_blur_grace(app: &AppHandle) {
     if let Some(state) = app.try_state::<Mutex<AppState>>() {
         capture_foreground(&state);
         if let Ok(mut guard) = state.lock() {
             guard.ignore_blur_until = state::now_ms() + 400;
         }
     }
-    position_near_cursor(window);
-    let _ = window.show();
+}
+
+fn focus_window(window: &tauri::WebviewWindow) {
     if let Ok(hwnd) = window.hwnd() {
         unsafe { paste::focus_window(HWND(hwnd.0)) };
     }
+}
+
+fn present(app: &AppHandle, window: &tauri::WebviewWindow, announce_history: bool) {
+    arm_blur_grace(app);
+    position_near_cursor(window);
+    let _ = window.show();
+    focus_window(window);
     let _ = window.set_focus();
     apply_system_corners(window);
     set_escape(app, true);
@@ -142,6 +198,14 @@ pub fn apply_system_corners(window: &tauri::WebviewWindow) {
 pub fn hide_panel(app: AppHandle) -> Result<(), String> {
     hide(&app);
     Ok(())
+}
+
+/// 收到任务栏。只在关掉自动隐藏时由标题栏按钮调用。
+#[tauri::command]
+pub fn minimize_panel(app: AppHandle) -> Result<(), String> {
+    let window = app.get_webview_window("main").ok_or("缺少主窗口".to_string())?;
+    set_escape(&app, false);
+    window.minimize().map_err(|err| format!("无法缩小窗口: {err}"))
 }
 
 /// 拖动开始前由前端调用。Windows 用标题栏拖动时会先 ReleaseCapture，窗口会误报失焦。

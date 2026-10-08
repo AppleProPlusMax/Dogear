@@ -19,6 +19,8 @@ const defaults: Settings = {
   theme: "system",
   reduceTransparency: false,
   ocrAuto: true,
+  autoHide: false,
+  guideSeen: false,
 };
 
 export type ShortcutField = "summon" | "capture";
@@ -37,6 +39,7 @@ export const useSettingsStore = defineStore("settings", () => {
   const settings = ref<Settings>({ ...defaults });
   const capturing = ref<ShortcutField | null>(null);
   const error = ref("");
+  const guideOpen = ref(false);
   let loaded = false;
   let listening = false;
 
@@ -45,6 +48,7 @@ export const useSettingsStore = defineStore("settings", () => {
       try {
         settings.value = await getSettings();
         applyTheme(settings.value.theme);
+        guideOpen.value = !settings.value.guideSeen;
         loaded = true;
       } catch (err) {
         error.value = message(err);
@@ -111,15 +115,32 @@ export const useSettingsStore = defineStore("settings", () => {
     }
   }
 
+  async function finishGuide() {
+    guideOpen.value = false;
+    if (settings.value.guideSeen) return;
+    try {
+      await update({ guideSeen: true });
+    } catch {
+      // 这次先关掉。没写入成功时，下次启动还会再出现。
+    }
+  }
+
+  function replayGuide() {
+    guideOpen.value = true;
+  }
+
   return {
     settings,
     capturing,
     error,
+    guideOpen,
     load,
     update,
     setTheme,
     startCapture,
     commitCapture,
     cancelCapture,
+    finishGuide,
+    replayGuide,
   };
 });

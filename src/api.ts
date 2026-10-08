@@ -56,6 +56,10 @@ export function hidePanel(): Promise<void> {
   return invoke("hide_panel");
 }
 
+export function minimizePanel(): Promise<void> {
+  return invoke("minimize_panel");
+}
+
 export function armWindowDrag(): Promise<void> {
   return invoke("arm_window_drag");
 }
@@ -74,6 +78,8 @@ export interface Settings {
   theme: ThemePreference;
   reduceTransparency: boolean;
   ocrAuto: boolean;
+  autoHide: boolean;
+  guideSeen: boolean;
 }
 
 export type SettingsPatch = Partial<Settings>;

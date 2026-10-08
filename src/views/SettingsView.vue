@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted } from "vue";
 import type { ThemePreference } from "../api";
 import { useSettingsStore, type ShortcutField } from "../stores/settings";
+import WindowControls from "../components/WindowControls.vue";
 
 const emit = defineEmits<{ back: [] }>();
 const store = useSettingsStore();
@@ -86,7 +87,7 @@ async function onCaptureKey(event: KeyboardEvent) {
   }
 }
 
-function toggle(field: "launchAtLogin" | "pauseRecording" | "reduceTransparency" | "ocrAuto") {
+function toggle(field: "launchAtLogin" | "pauseRecording" | "reduceTransparency" | "ocrAuto" | "autoHide") {
   void store.update({ [field]: !store.settings[field] });
 }
 
@@ -110,6 +111,7 @@ onUnmounted(() => {
         返回
       </button>
       <h1>设置</h1>
+      <span class="edge"><WindowControls /></span>
     </header>
 
     <div class="body">
@@ -179,6 +181,31 @@ onUnmounted(() => {
           >
             <span></span>
           </button>
+        </div>
+
+        <div class="row">
+          <div>
+            <div class="label">失焦后自动隐藏</div>
+            <p>关掉后，点到别的窗口不会收起，用标题栏的缩小和关闭</p>
+          </div>
+          <button
+            type="button"
+            class="switch"
+            role="switch"
+            :aria-checked="store.settings.autoHide"
+            aria-label="失焦后自动隐藏"
+            @click="toggle('autoHide')"
+          >
+            <span></span>
+          </button>
+        </div>
+
+        <div class="row">
+          <div>
+            <div class="label">使用教程</div>
+            <p>再看一遍关闭、呼出和粘贴</p>
+          </div>
+          <button type="button" class="text" @click="store.replayGuide()">再看一遍</button>
         </div>
       </section>
 
@@ -267,10 +294,15 @@ onUnmounted(() => {
 }
 .top h1 {
   margin: 0;
+  flex: 1;
   font-size: 20px;
   line-height: 28px;
   font-weight: 600;
   letter-spacing: -0.02em;
+}
+.edge {
+  margin-left: auto;
+  display: flex;
 }
 .back,
 .text,

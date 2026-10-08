@@ -25,6 +25,10 @@ pub struct Settings {
     pub theme: String,
     pub reduce_transparency: bool,
     pub ocr_auto: bool,
+    /// 失焦后收起窗口。默认关着，窗口留在任务栏，用缩小和关闭来收起。
+    pub auto_hide: bool,
+    /// 已经看过或跳过首次教程。
+    pub guide_seen: bool,
 }
 
 impl Default for Settings {
@@ -37,6 +41,8 @@ impl Default for Settings {
             theme: "system".into(),
             reduce_transparency: false,
             ocr_auto: true,
+            auto_hide: false,
+            guide_seen: false,
         }
     }
 }
@@ -51,6 +57,8 @@ pub struct SettingsPatch {
     pub theme: Option<String>,
     pub reduce_transparency: Option<bool>,
     pub ocr_auto: Option<bool>,
+    pub auto_hide: Option<bool>,
+    pub guide_seen: Option<bool>,
 }
 
 pub fn load() -> Settings {
@@ -117,6 +125,9 @@ pub fn update(app: &AppHandle, patch: SettingsPatch) -> Result<Settings, String>
         guard.shortcut_capture = false;
     }
     tray::set_paused(next.pause_recording);
+    if next.auto_hide != current.auto_hide {
+        panel::apply_auto_hide(app, next.auto_hide);
+    }
     let _ = app.emit("settings-changed", &next);
     Ok(next)
 }
@@ -245,6 +256,12 @@ fn merge(current: Settings, patch: SettingsPatch) -> Result<Settings, String> {
     }
     if let Some(value) = patch.ocr_auto {
         next.ocr_auto = value;
+    }
+    if let Some(value) = patch.auto_hide {
+        next.auto_hide = value;
+    }
+    if let Some(value) = patch.guide_seen {
+        next.guide_seen = value;
     }
     if next.summon_shortcut == next.capture_shortcut {
         return Err("呼出和截图不能使用同一个快捷键".into());
@@ -486,5 +503,13 @@ mod tests {
             },
         );
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn missing_auto_hide_stays_off() {
+        let settings: Settings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
+        assert!(!settings.auto_hide);
+        assert!(!settings.guide_seen);
+        assert_eq!(settings.theme, "dark");
     }
 }

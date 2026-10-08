@@ -4,6 +4,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import markUrl from "../src-tauri/icons/128x128.png";
 import { useSettingsStore } from "./stores/settings";
 import SettingsView from "./views/SettingsView.vue";
+import WindowControls from "./components/WindowControls.vue";
+import FirstRunGuide from "./components/FirstRunGuide.vue";
 import {
   armWindowDrag,
   clipImage,
@@ -229,13 +231,18 @@ function showHistory() {
   focusSearch();
 }
 
+watch(() => settingsStore.guideOpen, (open) => {
+  if (open) view.value = "history";
+  else focusSearch();
+});
+
 function shortcutParts(shortcut: string) {
   return shortcut.split("+").filter(Boolean);
 }
 
 function onEscape(event: KeyboardEvent) {
   if (event.key !== "Escape") return;
-  if (settingsStore.capturing) return;
+  if (settingsStore.capturing || settingsStore.guideOpen) return;
   if (!("__TAURI_INTERNALS__" in window)) return;
   event.preventDefault();
   event.stopPropagation();
@@ -349,12 +356,15 @@ onUnmounted(() => {
       <div class="brand" data-tauri-drag-region>
         <img :src="markUrl" alt="" />
         <span>Dogear</span>
-        <button type="button" class="gear" aria-label="设置" @click="view = 'settings'">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="12" r="3" />
-            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
-          </svg>
-        </button>
+        <span class="actions">
+          <button type="button" class="gear" aria-label="设置" @click="view = 'settings'">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+            </svg>
+          </button>
+          <WindowControls />
+        </span>
       </div>
       <div class="search" data-tauri-drag-region>
         <span class="search-icon" data-tauri-drag-region>
@@ -527,11 +537,13 @@ onUnmounted(() => {
       </div>
       <div class="count">{{ settingsStore.settings.summonShortcut }} · {{ clips.length }} 条</div>
     </footer>
+    <FirstRunGuide v-if="settingsStore.guideOpen" />
   </main>
 </template>
 
 <style scoped>
 .panel {
+  position: relative;
   box-sizing: border-box;
   height: 100%;
   display: flex;
@@ -555,8 +567,14 @@ onUnmounted(() => {
   margin-bottom: 10px;
   cursor: grab;
 }
-.brand img,
-.brand span {
+.brand .actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.brand > img,
+.brand > span:not(.actions) {
   pointer-events: none;
 }
 .brand img {
@@ -573,7 +591,6 @@ onUnmounted(() => {
 .gear {
   -webkit-app-region: no-drag;
   app-region: no-drag;
-  margin-left: auto;
   width: 28px;
   height: 28px;
   display: flex;

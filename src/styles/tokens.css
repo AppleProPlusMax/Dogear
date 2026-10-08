@@ -30,6 +30,7 @@
   --tile-code: #8e5bff;
   --tile-image: #ff8a3d;
   --good: #1fa971;
+  --scrim: rgba(29, 29, 31, 0.28);
   color-scheme: light;
 }
 
@@ -58,6 +59,7 @@ html[data-theme="dark"] {
   --tile-code: #b08cff;
   --tile-image: #ffa05e;
   --good: #4bd694;
+  --scrim: rgba(0, 0, 0, 0.45);
   color-scheme: dark;
 }
 
@@ -87,6 +89,7 @@ html[data-theme="dark"] {
     --tile-code: #b08cff;
     --tile-image: #ffa05e;
     --good: #4bd694;
+    --scrim: rgba(0, 0, 0, 0.45);
     color-scheme: dark;
   }
 }
@@ -120,6 +123,7 @@ html[data-theme="dark"][data-effect="solid"] {
     --on-accent: HighlightText;
     --card: Canvas;
     --card-border: CanvasText;
+    --scrim: transparent;
   }
 }
 
