@@ -3,7 +3,9 @@ use std::thread;
 use std::time::Duration;
 
 use tauri::{AppHandle, State};
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
@@ -11,7 +13,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
-    ShowWindow, SW_SHOW,
+    ShowWindow, SW_SHOW, SW_SHOWNORMAL,
 };
 
 use crate::clipboard;
@@ -53,6 +55,51 @@ fn write_payload(payload: &Payload) -> Result<(), String> {
         Payload::Text(text) => clipboard::write_text(text),
         Payload::Image { png, hash } => clipboard::write_image(png, hash),
     }
+}
+
+#[tauri::command]
+pub fn open_link(state: State<'_, Mutex<AppState>>, id: i64) -> Result<(), String> {
+    let content = {
+        let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+        let clip = guard
+            .clips
+            .iter()
+            .find(|clip| clip.id == id)
+            .ok_or("记录不存在")?;
+        if clip.kind != "link" {
+            return Err("这不是链接".into());
+        }
+        clip.content.clone()
+    };
+    let url = crate::detect::browser_url(&content).ok_or("这条链接打不开")?;
+    open_in_browser(&url)
+}
+
+fn open_in_browser(url: &str) -> Result<(), String> {
+    let operation = wide("open");
+    let target = wide(url);
+    let code = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(operation.as_ptr()),
+            PCWSTR(target.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if (code.0 as isize) <= 32 {
+        return Err("无法在浏览器中打开".into());
+    }
+    Ok(())
+}
+
+fn wide(text: &str) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    std::ffi::OsStr::new(text)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 #[tauri::command]

@@ -45,11 +45,23 @@ pub fn classify(content: &str) -> Detection {
 }
 
 fn is_url(text: &str) -> bool {
-    if text.chars().any(char::is_whitespace) {
+    if text.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
         return false;
     }
     let lower = text.to_ascii_lowercase();
     lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("www.")
+}
+
+/// 能交给系统默认浏览器的地址。`www.` 补上 `https://`，其余保持原文。
+pub fn browser_url(text: &str) -> Option<String> {
+    let text = text.trim();
+    if !is_url(text) {
+        return None;
+    }
+    if text.to_ascii_lowercase().starts_with("www.") {
+        return Some(format!("https://{text}"));
+    }
+    Some(text.to_string())
 }
 
 fn is_sql(text: &str) -> bool {
@@ -278,7 +290,7 @@ fn is_ident(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::classify;
+    use super::{browser_url, classify};
 
     #[test]
     fn javascript_object_is_code() {
@@ -344,6 +356,20 @@ mod tests {
     #[test]
     fn url_stays_link() {
         assert_eq!(classify("https://example.com/a").kind, "link");
+    }
+
+    #[test]
+    fn browser_url_keeps_http_and_prefixes_www() {
+        assert_eq!(
+            browser_url("https://example.com/a?q=1"),
+            Some("https://example.com/a?q=1".into())
+        );
+        assert_eq!(
+            browser_url("www.example.com"),
+            Some("https://www.example.com".into())
+        );
+        assert_eq!(browser_url("not a url"), None);
+        assert_eq!(browser_url("javascript:alert(1)"), None);
     }
 
     #[test]

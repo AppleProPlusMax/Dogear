@@ -70,6 +70,7 @@ pub fn run() {
             panel::clip_thumb,
             panel::retry_ocr,
             paste::copy_clip,
+            paste::open_link,
             paste::paste_clip,
             capture::start_capture,
             get_effect_state,

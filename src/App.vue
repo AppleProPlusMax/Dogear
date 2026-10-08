@@ -11,6 +11,7 @@ import {
   clipImage,
   clipThumb,
   copyClip,
+  openLink,
   getEffectState,
   hidePanel,
   listClips,
@@ -173,6 +174,18 @@ async function pasteSelected(asText = false) {
   notice.value = "";
   try {
     await pasteClip(clip.id, asText);
+  } catch (err) {
+    notice.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+async function openSelected() {
+  const clip = current.value;
+  if (!clip || clip.kind !== "link") return;
+  notice.value = "";
+  try {
+    await openLink(clip.id);
+    notice.value = "已在浏览器中打开";
   } catch (err) {
     notice.value = err instanceof Error ? err.message : String(err);
   }
@@ -510,6 +523,7 @@ onUnmounted(() => {
 
         <template v-else>
           <div class="actions">
+            <button v-if="current.kind === 'link'" type="button" class="btn" @click="openSelected()">打开</button>
             <button type="button" class="btn" @click="copySelected()">复制</button>
             <button type="button" class="btn pri" @click="pasteSelected()">粘贴</button>
           </div>

@@ -36,6 +36,10 @@ export function copyClip(id: number, asText = false): Promise<void> {
   return invoke("copy_clip", { id, asText });
 }
 
+export function openLink(id: number): Promise<void> {
+  return invoke("open_link", { id });
+}
+
 export function clipImage(id: number): Promise<string> {
   return invoke("clip_image", { id });
 }
