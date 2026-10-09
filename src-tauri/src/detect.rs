@@ -64,6 +64,177 @@ pub fn browser_url(text: &str) -> Option<String> {
     Some(text.to_string())
 }
 
+/// 代码预览。`raw` 原样返回，不改库存内容。
+pub fn present_code(content: &str, language: Option<&str>, view: &str) -> String {
+    match view {
+        "pretty" => pretty_code(content, language),
+        "compact" => compact_code(content, language),
+        _ => content.to_string(),
+    }
+}
+
+fn pretty_code(content: &str, language: Option<&str>) -> String {
+    match language {
+        Some("json") => pretty_json(content).unwrap_or_else(|| content.to_string()),
+        Some("sql") => format_sql(content),
+        _ => tidy_lines(content),
+    }
+}
+
+fn compact_code(content: &str, language: Option<&str>) -> String {
+    match language {
+        Some("json") => compact_json(content).unwrap_or_else(|| collapse_ws(content)),
+        Some("python") | Some("shell") | None => content.to_string(),
+        _ => collapse_ws(content),
+    }
+}
+
+fn pretty_json(text: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    serde_json::to_string_pretty(&value).ok()
+}
+
+fn compact_json(text: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    serde_json::to_string(&value).ok()
+}
+
+fn tidy_lines(text: &str) -> String {
+    let ends = text.ends_with('\n');
+    let mut body = text
+        .lines()
+        .map(|line| line.trim_end().replace('\t', "  "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if ends {
+        body.push('\n');
+    }
+    body
+}
+
+fn collapse_ws(text: &str) -> String {
+    let mut out = String::new();
+    let mut spaced = false;
+    let mut quote: Option<char> = None;
+    for ch in text.chars() {
+        if let Some(mark) = quote {
+            out.push(ch);
+            if ch == mark {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '\'' || ch == '"' || ch == '`' {
+            if spaced && !out.is_empty() {
+                out.push(' ');
+            }
+            spaced = false;
+            quote = Some(ch);
+            out.push(ch);
+            continue;
+        }
+        if ch.is_whitespace() {
+            spaced = !out.is_empty();
+            continue;
+        }
+        if spaced {
+            out.push(' ');
+            spaced = false;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn format_sql(text: &str) -> String {
+    let compact = collapse_ws(text);
+    const KEYWORDS: &[&str] = &[
+        "LEFT OUTER JOIN",
+        "RIGHT OUTER JOIN",
+        "FULL OUTER JOIN",
+        "LEFT JOIN",
+        "RIGHT JOIN",
+        "INNER JOIN",
+        "CROSS JOIN",
+        "GROUP BY",
+        "ORDER BY",
+        "INSERT INTO",
+        "DELETE FROM",
+        "SELECT",
+        "FROM",
+        "WHERE",
+        "HAVING",
+        "LIMIT",
+        "OFFSET",
+        "VALUES",
+        "UPDATE",
+        "JOIN",
+        "UNION",
+        "SET",
+        "AND",
+        "OR",
+    ];
+    let chars: Vec<char> = compact.chars().collect();
+    let mut out = String::new();
+    let mut index = 0;
+    let mut quote: Option<char> = None;
+    while index < chars.len() {
+        let ch = chars[index];
+        if let Some(mark) = quote {
+            out.push(ch);
+            if ch == mark {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if ch == '\'' || ch == '"' || ch == '`' {
+            quote = Some(ch);
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        if let Some(keyword) = KEYWORDS.iter().copied().find(|keyword| starts_keyword(&chars, index, keyword)) {
+            if index > 0 && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            let width = keyword.chars().count();
+            for offset in 0..width {
+                out.push(chars[index + offset]);
+            }
+            index += width;
+            continue;
+        }
+        out.push(ch);
+        index += 1;
+    }
+    out
+}
+
+fn starts_keyword(chars: &[char], index: usize, keyword: &str) -> bool {
+    let word: Vec<char> = keyword.chars().collect();
+    let end = index + word.len();
+    if end > chars.len() {
+        return false;
+    }
+    if index > 0 {
+        let prev = chars[index - 1];
+        if prev.is_ascii_alphanumeric() || prev == '_' {
+            return false;
+        }
+    }
+    if end < chars.len() {
+        let next = chars[end];
+        if next.is_ascii_alphanumeric() || next == '_' {
+            return false;
+        }
+    }
+    chars[index..end]
+        .iter()
+        .zip(word.iter())
+        .all(|(got, want)| got.eq_ignore_ascii_case(want))
+}
+
 fn is_sql(text: &str) -> bool {
     let mut rest = text;
     loop {
@@ -290,7 +461,7 @@ fn is_ident(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{browser_url, classify};
+    use super::{browser_url, classify, present_code};
 
     #[test]
     fn javascript_object_is_code() {
@@ -370,6 +541,27 @@ mod tests {
         );
         assert_eq!(browser_url("not a url"), None);
         assert_eq!(browser_url("javascript:alert(1)"), None);
+    }
+
+    #[test]
+    fn json_views_keep_key_order_and_original() {
+        let raw = "{\"b\":1,\"a\":[2, 3]}";
+        let pretty = present_code(raw, Some("json"), "pretty");
+        assert!(pretty.contains('\n'));
+        assert!(pretty.find("\"b\"").unwrap() < pretty.find("\"a\"").unwrap());
+        let compact = present_code(raw, Some("json"), "compact");
+        assert_eq!(compact, "{\"b\":1,\"a\":[2,3]}");
+        assert_eq!(present_code(raw, Some("json"), "raw"), raw);
+    }
+
+    #[test]
+    fn sql_compact_is_one_line_and_pretty_breaks_keywords() {
+        let raw = "select id from users where id = 1";
+        let compact = present_code(raw, Some("sql"), "compact");
+        assert!(!compact.contains('\n'));
+        let pretty = present_code(raw, Some("sql"), "pretty");
+        assert!(pretty.contains("\nfrom") || pretty.contains("\nFROM") || pretty.to_ascii_lowercase().contains("\nfrom"));
+        assert!(pretty.to_ascii_lowercase().contains("\nwhere"));
     }
 
     #[test]

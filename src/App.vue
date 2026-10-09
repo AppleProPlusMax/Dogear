@@ -12,6 +12,7 @@ import {
   clipThumb,
   copyClip,
   openLink,
+  previewCode,
   getEffectState,
   hidePanel,
   listClips,
@@ -22,6 +23,14 @@ import {
 } from "./api";
 
 type FilterId = "all" | "text" | "link" | "image" | "code";
+
+type CodeView = "pretty" | "compact" | "raw";
+
+const codeModes: { id: CodeView; label: string }[] = [
+  { id: "pretty", label: "格式化" },
+  { id: "compact", label: "压缩" },
+  { id: "raw", label: "原文" },
+];
 
 const filters: { id: FilterId; label: string }[] = [
   { id: "all", label: "全部" },
@@ -43,6 +52,9 @@ const query = ref("");
 const filter = ref<FilterId>("all");
 const selected = ref(0);
 const notice = ref("");
+const codeView = ref<CodeView>("pretty");
+const shownCode = ref("");
+let previewToken = 0;
 const searchEl = ref<HTMLInputElement | null>(null);
 /// 图片以 data URL 取回，按条目缓存，避免每次切换选中都重新读盘。
 const thumbs = ref<Record<number, string>>({});
@@ -169,6 +181,17 @@ const currentText = computed(() => {
   return clip.kind === "image" ? clip.ocrText ?? "" : clip.content;
 });
 
+const displayContent = computed(() => {
+  const clip = current.value;
+  if (!clip) return "";
+  if (clip.kind === "code" && codeView.value !== "raw") return shownCode.value || clip.content;
+  return clip.content;
+});
+
+function clipView(clip: Clip | undefined) {
+  return clip?.kind === "code" ? codeView.value : "raw";
+}
+
 function focusSearch() {
   nextTick(() => searchEl.value?.focus());
 }
@@ -178,7 +201,7 @@ async function pasteSelected(asText = false) {
   if (!clip) return;
   notice.value = "";
   try {
-    await pasteClip(clip.id, asText);
+    await pasteClip(clip.id, asText, clipView(clip));
   } catch (err) {
     notice.value = err instanceof Error ? err.message : String(err);
   }
@@ -201,7 +224,7 @@ async function copySelected(asText = false) {
   if (!clip) return;
   notice.value = "";
   try {
-    await copyClip(clip.id, asText);
+    await copyClip(clip.id, asText, clipView(clip));
     notice.value = asText ? "已复制文字" : "已复制";
   } catch (err) {
     notice.value = err instanceof Error ? err.message : String(err);
@@ -317,6 +340,24 @@ function relativeTime(createdAt: number) {
 function lineCount(content: string) {
   return content.split(/\r?\n/).length;
 }
+
+watch(
+  [() => current.value?.id, () => current.value?.content, codeView],
+  async () => {
+    const clip = current.value;
+    const token = ++previewToken;
+    if (!clip || clip.kind !== "code" || codeView.value === "raw") {
+      shownCode.value = clip?.kind === "code" ? clip.content : "";
+      return;
+    }
+    try {
+      const text = await previewCode(clip.id, codeView.value);
+      if (token === previewToken) shownCode.value = text;
+    } catch {
+      if (token === previewToken) shownCode.value = clip.content;
+    }
+  },
+);
 
 watch(selected, () => {
   void loadFullImage();
@@ -541,16 +582,30 @@ onUnmounted(() => {
         </template>
 
         <template v-else>
-          <div class="actions">
+          <div class="actions" :class="{ 'with-switch': current.kind === 'code' }">
+            <div v-if="current.kind === 'code'" class="seg mini" role="tablist" aria-label="代码显示">
+              <button
+                v-for="mode in codeModes"
+                :key="mode.id"
+                type="button"
+                role="tab"
+                :class="{ on: codeView === mode.id }"
+                :aria-selected="codeView === mode.id"
+                :aria-label="mode.label"
+                @click="codeView = mode.id"
+              >
+                {{ mode.label }}
+              </button>
+            </div>
             <button v-if="current.kind === 'link'" type="button" class="btn" @click="openSelected()">打开</button>
             <button type="button" class="btn" @click="copySelected()">复制</button>
             <button type="button" class="btn pri" @click="pasteSelected()">粘贴</button>
           </div>
-          <div class="card" :class="{ mono: current.kind !== 'text' }">{{ current.content }}</div>
+          <div class="card" :class="{ mono: current.kind !== 'text' }">{{ displayContent }}</div>
           <div class="facts">
-            <span><b>{{ lineCount(current.content) }}</b> 行</span>
+            <span><b>{{ lineCount(displayContent) }}</b> 行</span>
             <i></i>
-            <span><b>{{ current.content.length }}</b> 字</span>
+            <span><b>{{ displayContent.length }}</b> 字</span>
           </div>
         </template>
 
@@ -946,7 +1001,29 @@ onUnmounted(() => {
 .actions {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 8px;
+}
+.actions.with-switch {
+  justify-content: flex-start;
+}
+.actions.with-switch .seg {
+  margin-right: auto;
+}
+.seg.mini {
+  height: 32px;
+  padding: 2px;
+  border-radius: 9px;
+  box-sizing: border-box;
+}
+.seg.mini button {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12.5px;
+  font-weight: 550;
+  line-height: 28px;
+  border-radius: 7px;
+  white-space: nowrap;
 }
 .btn {
   height: 32px;

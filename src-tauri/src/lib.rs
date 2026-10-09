@@ -72,6 +72,7 @@ pub fn run() {
             paste::copy_clip,
             paste::open_link,
             paste::paste_clip,
+            paste::preview_code,
             capture::start_capture,
             get_effect_state,
             get_settings,

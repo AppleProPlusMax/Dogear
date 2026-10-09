@@ -28,12 +28,16 @@ export function listClips(): Promise<Clip[]> {
   return invoke("list_clips");
 }
 
-export function pasteClip(id: number, asText = false): Promise<void> {
-  return invoke("paste_clip", { id, asText });
+export function pasteClip(id: number, asText = false, view = "raw"): Promise<void> {
+  return invoke("paste_clip", { id, asText, view });
 }
 
-export function copyClip(id: number, asText = false): Promise<void> {
-  return invoke("copy_clip", { id, asText });
+export function copyClip(id: number, asText = false, view = "raw"): Promise<void> {
+  return invoke("copy_clip", { id, asText, view });
+}
+
+export function previewCode(id: number, view: string): Promise<string> {
+  return invoke("preview_code", { id, view });
 }
 
 export function openLink(id: number): Promise<void> {

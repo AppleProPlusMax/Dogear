@@ -25,7 +25,7 @@ enum Payload {
     Image { png: Vec<u8>, hash: String },
 }
 
-fn payload(state: &State<'_, Mutex<AppState>>, id: i64, as_text: bool) -> Result<Payload, String> {
+fn payload(state: &State<'_, Mutex<AppState>>, id: i64, as_text: bool, view: &str) -> Result<Payload, String> {
     let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
     let clip = guard
         .clips
@@ -33,7 +33,12 @@ fn payload(state: &State<'_, Mutex<AppState>>, id: i64, as_text: bool) -> Result
         .find(|clip| clip.id == id)
         .ok_or("记录不存在")?;
     if clip.kind != "image" {
-        return Ok(Payload::Text(clip.content.clone()));
+        let text = if clip.kind == "code" {
+            crate::detect::present_code(&clip.content, clip.language.as_deref(), view)
+        } else {
+            clip.content.clone()
+        };
+        return Ok(Payload::Text(text));
     }
     if as_text {
         let text = clip
@@ -103,8 +108,23 @@ fn wide(text: &str) -> Vec<u16> {
 }
 
 #[tauri::command]
-pub fn copy_clip(state: State<'_, Mutex<AppState>>, id: i64, as_text: bool) -> Result<(), String> {
-    write_payload(&payload(&state, id, as_text)?)
+pub fn preview_code(state: State<'_, Mutex<AppState>>, id: i64, view: String) -> Result<String, String> {
+    let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+    let clip = guard
+        .clips
+        .iter()
+        .find(|clip| clip.id == id)
+        .ok_or("记录不存在")?;
+    Ok(crate::detect::present_code(
+        &clip.content,
+        clip.language.as_deref(),
+        &view,
+    ))
+}
+
+#[tauri::command]
+pub fn copy_clip(state: State<'_, Mutex<AppState>>, id: i64, as_text: bool, view: Option<String>) -> Result<(), String> {
+    write_payload(&payload(&state, id, as_text, view.as_deref().unwrap_or("raw"))?)
 }
 
 #[tauri::command]
@@ -113,8 +133,9 @@ pub fn paste_clip(
     state: State<'_, Mutex<AppState>>,
     id: i64,
     as_text: bool,
+    view: Option<String>,
 ) -> Result<(), String> {
-    let payload = payload(&state, id, as_text)?;
+    let payload = payload(&state, id, as_text, view.as_deref().unwrap_or("raw"))?;
     let hwnd = {
         let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
         guard.previous_hwnd
