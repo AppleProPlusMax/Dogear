@@ -89,7 +89,8 @@ pub fn open(app: &AppHandle) {
     show(app, &window);
 }
 
-/// 关掉自动隐藏时窗口进任务栏、不再置顶。重新打开时若正缩在任务栏，先收回托盘，避免任务栏按钮消失后窗口出不来。
+/// 失焦隐藏只决定会不会收起、进不进任务栏。是否留在最前只看标题栏的固定按钮。
+/// 重新打开自动隐藏时若正缩在任务栏，先收回托盘，避免任务栏按钮消失后窗口出不来。
 pub fn apply_auto_hide(app: &AppHandle, auto_hide: bool) {
     let Some(window) = app.get_webview_window("main") else {
         return;
@@ -97,7 +98,11 @@ pub fn apply_auto_hide(app: &AppHandle, auto_hide: bool) {
     if auto_hide && window.is_minimized().unwrap_or(false) {
         hide(app);
     }
-    let _ = window.set_always_on_top(auto_hide);
+    let pinned = app
+        .try_state::<Mutex<AppState>>()
+        .and_then(|state| state.lock().ok().map(|guard| guard.settings.pinned))
+        .unwrap_or(false);
+    let _ = window.set_always_on_top(pinned);
     let _ = window.set_skip_taskbar(auto_hide);
 }
 

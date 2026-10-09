@@ -83,6 +83,7 @@ export interface Settings {
   reduceTransparency: boolean;
   ocrAuto: boolean;
   autoHide: boolean;
+  pinned: boolean;
   guideSeen: boolean;
 }
 

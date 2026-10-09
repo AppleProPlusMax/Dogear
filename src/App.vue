@@ -32,6 +32,11 @@ const filters: { id: FilterId; label: string }[] = [
 ];
 
 const settingsStore = useSettingsStore();
+
+function togglePinned() {
+  if (settingsStore.settings.autoHide) return;
+  void settingsStore.update({ pinned: !settingsStore.settings.pinned }).catch(() => {});
+}
 const view = ref<"history" | "settings">("history");
 const clips = ref<Clip[]>([]);
 const query = ref("");
@@ -370,6 +375,20 @@ onUnmounted(() => {
         <img :src="markUrl" alt="" />
         <span>Dogear</span>
         <span class="actions">
+          <button
+            v-if="!settingsStore.settings.autoHide"
+            type="button"
+            class="gear"
+            :class="{ on: settingsStore.settings.pinned }"
+            :aria-pressed="settingsStore.settings.pinned"
+            :aria-label="settingsStore.settings.pinned ? '取消固定在最前' : '固定在最前'"
+            @click="togglePinned"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 17v5" />
+              <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+            </svg>
+          </button>
           <button type="button" class="gear" aria-label="设置" @click="view = 'settings'">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <circle cx="12" cy="12" r="3" />
@@ -619,6 +638,14 @@ onUnmounted(() => {
 .gear:hover {
   background: var(--fill);
   color: var(--text);
+}
+.gear.on {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.gear.on:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 .gear svg {
   width: 16px;

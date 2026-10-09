@@ -20,6 +20,7 @@ const defaults: Settings = {
   reduceTransparency: false,
   ocrAuto: true,
   autoHide: false,
+  pinned: false,
   guideSeen: false,
 };
 

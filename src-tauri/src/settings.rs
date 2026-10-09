@@ -27,6 +27,8 @@ pub struct Settings {
     pub ocr_auto: bool,
     /// 失焦后收起窗口。默认关着，窗口留在任务栏，用缩小和关闭来收起。
     pub auto_hide: bool,
+    /// 窗口固定在其他窗口前面。失焦隐藏打开时会被关掉。
+    pub pinned: bool,
     /// 已经看过或跳过首次教程。
     pub guide_seen: bool,
 }
@@ -42,6 +44,7 @@ impl Default for Settings {
             reduce_transparency: false,
             ocr_auto: true,
             auto_hide: false,
+            pinned: false,
             guide_seen: false,
         }
     }
@@ -58,6 +61,7 @@ pub struct SettingsPatch {
     pub reduce_transparency: Option<bool>,
     pub ocr_auto: Option<bool>,
     pub auto_hide: Option<bool>,
+    pub pinned: Option<bool>,
     pub guide_seen: Option<bool>,
 }
 
@@ -125,7 +129,7 @@ pub fn update(app: &AppHandle, patch: SettingsPatch) -> Result<Settings, String>
         guard.shortcut_capture = false;
     }
     tray::set_paused(next.pause_recording);
-    if next.auto_hide != current.auto_hide {
+    if next.auto_hide != current.auto_hide || next.pinned != current.pinned {
         panel::apply_auto_hide(app, next.auto_hide);
     }
     let _ = app.emit("settings-changed", &next);
@@ -260,8 +264,14 @@ fn merge(current: Settings, patch: SettingsPatch) -> Result<Settings, String> {
     if let Some(value) = patch.auto_hide {
         next.auto_hide = value;
     }
+    if let Some(value) = patch.pinned {
+        next.pinned = value;
+    }
     if let Some(value) = patch.guide_seen {
         next.guide_seen = value;
+    }
+    if next.auto_hide {
+        next.pinned = false;
     }
     if next.summon_shortcut == next.capture_shortcut {
         return Err("呼出和截图不能使用同一个快捷键".into());
@@ -278,6 +288,9 @@ fn normalize_loaded(mut settings: Settings) -> Settings {
     }
     if normalize_theme(&settings.theme).is_err() {
         settings.theme = "system".into();
+    }
+    if settings.auto_hide {
+        settings.pinned = false;
     }
     settings
 }
@@ -482,7 +495,7 @@ fn settings_path() -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{merge, normalize_shortcut, Settings, SettingsPatch};
+    use super::{merge, normalize_loaded, normalize_shortcut, Settings, SettingsPatch};
 
     #[test]
     fn normalizes_modifier_order_and_case() {
@@ -506,9 +519,31 @@ mod tests {
     }
 
     #[test]
+    fn auto_hide_turns_pin_off() {
+        let mut current = Settings::default();
+        current.pinned = true;
+        let next = merge(
+            current,
+            SettingsPatch {
+                auto_hide: Some(true),
+                ..SettingsPatch::default()
+            },
+        )
+        .unwrap();
+        assert!(next.auto_hide);
+        assert!(!next.pinned);
+
+        let mut loaded = Settings::default();
+        loaded.auto_hide = true;
+        loaded.pinned = true;
+        assert!(!normalize_loaded(loaded).pinned);
+    }
+
+    #[test]
     fn missing_auto_hide_stays_off() {
         let settings: Settings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
         assert!(!settings.auto_hide);
+        assert!(!settings.pinned);
         assert!(!settings.guide_seen);
         assert_eq!(settings.theme, "dark");
     }
