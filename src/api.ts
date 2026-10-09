@@ -40,6 +40,20 @@ export function previewCode(id: number, view: string): Promise<string> {
   return invoke("preview_code", { id, view });
 }
 
+export interface FoundColor {
+  hex: string;
+  rgb: string;
+  hsl: string;
+}
+
+export function clipColors(id: number): Promise<FoundColor[]> {
+  return invoke("clip_colors", { id });
+}
+
+export function copyPlain(text: string): Promise<void> {
+  return invoke("copy_plain", { text });
+}
+
 export function openLink(id: number): Promise<void> {
   return invoke("open_link", { id });
 }

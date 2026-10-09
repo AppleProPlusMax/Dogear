@@ -108,6 +108,28 @@ fn wide(text: &str) -> Vec<u16> {
 }
 
 #[tauri::command]
+pub fn clip_colors(state: State<'_, Mutex<AppState>>, id: i64) -> Result<Vec<crate::detect::FoundColor>, String> {
+    let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+    let clip = guard
+        .clips
+        .iter()
+        .find(|clip| clip.id == id)
+        .ok_or("记录不存在")?;
+    if clip.kind != "text" && clip.kind != "code" {
+        return Ok(Vec::new());
+    }
+    Ok(crate::detect::find_colors(&clip.content))
+}
+
+#[tauri::command]
+pub fn copy_plain(text: String) -> Result<(), String> {
+    if text.chars().count() > 80 {
+        return Err("只能复制较短的颜色值".into());
+    }
+    clipboard::write_text(&text)
+}
+
+#[tauri::command]
 pub fn preview_code(state: State<'_, Mutex<AppState>>, id: i64, view: String) -> Result<String, String> {
     let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
     let clip = guard

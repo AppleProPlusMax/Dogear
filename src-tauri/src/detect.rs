@@ -445,6 +445,330 @@ fn guess_language(text: &str) -> &'static str {
         .unwrap_or("other")
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FoundColor {
+    pub hex: String,
+    pub rgb: String,
+    pub hsl: String,
+}
+
+/// 在文本或代码里找出颜色。最多 8 个，相同色值只留一次。不改原文。
+pub fn find_colors(text: &str) -> Vec<FoundColor> {
+    let bytes = text.as_bytes();
+    let mut found = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() && found.len() < 8 {
+        if let Some((color, next)) = color_at(bytes, index) {
+            if !found.iter().any(|item: &FoundColor| item.hex == color.hex) {
+                found.push(color);
+            }
+            index = next.max(index + 1);
+            continue;
+        }
+        index += 1;
+    }
+    found
+}
+
+fn color_at(bytes: &[u8], index: usize) -> Option<(FoundColor, usize)> {
+    if bytes[index] == b'#' {
+        return hex_at(bytes, index);
+    }
+    css_fn_at(bytes, index)
+}
+
+fn hex_at(bytes: &[u8], index: usize) -> Option<(FoundColor, usize)> {
+    let mut end = index + 1;
+    while end < bytes.len() && bytes[end].is_ascii_hexdigit() {
+        end += 1;
+    }
+    let len = end - (index + 1);
+    if !matches!(len, 3 | 4 | 6 | 8) {
+        return None;
+    }
+    if matches!(len, 3 | 4) && !short_hex_ok(bytes, index) {
+        return None;
+    }
+    let digits = &bytes[index + 1..end];
+    let (r, g, b, a) = match len {
+        3 => (doubled(digits[0]), doubled(digits[1]), doubled(digits[2]), 255),
+        4 => (
+            doubled(digits[0]),
+            doubled(digits[1]),
+            doubled(digits[2]),
+            doubled(digits[3]),
+        ),
+        6 => (pair(digits[0], digits[1]), pair(digits[2], digits[3]), pair(digits[4], digits[5]), 255),
+        _ => (
+            pair(digits[0], digits[1]),
+            pair(digits[2], digits[3]),
+            pair(digits[4], digits[5]),
+            pair(digits[6], digits[7]),
+        ),
+    };
+    Some((paint(r, g, b, a), end))
+}
+
+/// 三位、四位十六进制太容易撞上「#123」这种编号，只在看起来像赋值时才算。
+fn short_hex_ok(bytes: &[u8], hash_at: usize) -> bool {
+    let mut index = hash_at;
+    while index > 0 && bytes[index - 1].is_ascii_whitespace() {
+        index -= 1;
+    }
+    if index == 0 {
+        return true;
+    }
+    matches!(bytes[index - 1], b':' | b'=' | b'"' | b'\'' | b'(' | b',' | b'[' | b'{')
+}
+
+fn css_fn_at(bytes: &[u8], index: usize) -> Option<(FoundColor, usize)> {
+    if index > 0 && is_ident_byte(bytes[index - 1]) {
+        return None;
+    }
+    let rest = &bytes[index..];
+    let (hsl, name_len) = if starts_ci(rest, b"hsla") {
+        (true, 4)
+    } else if starts_ci(rest, b"hsl") {
+        (true, 3)
+    } else if starts_ci(rest, b"rgba") {
+        (false, 4)
+    } else if starts_ci(rest, b"rgb") {
+        (false, 3)
+    } else {
+        return None;
+    };
+    let mut cursor = skip_ws(bytes, index + name_len);
+    if cursor >= bytes.len() || bytes[cursor] != b'(' {
+        return None;
+    }
+    cursor += 1;
+    let (first, cursor) = number_at(bytes, cursor)?;
+    let cursor = separator(bytes, cursor)?;
+    let (second, cursor) = number_at(bytes, cursor)?;
+    let cursor = separator(bytes, cursor)?;
+    let (third, mut cursor) = number_at(bytes, cursor)?;
+    cursor = skip_ws(bytes, cursor);
+    let (alpha, mut cursor) = if cursor < bytes.len() && (bytes[cursor] == b',' || bytes[cursor] == b'/') {
+        let (alpha, cursor) = number_at(bytes, skip_ws(bytes, cursor + 1))?;
+        (Some(alpha), cursor)
+    } else {
+        (None, cursor)
+    };
+    cursor = skip_ws(bytes, cursor);
+    if cursor >= bytes.len() || bytes[cursor] != b')' {
+        return None;
+    }
+    let color = if hsl {
+        from_hsl(first, second, third, alpha)?
+    } else {
+        from_rgb(first, second, third, alpha)?
+    };
+    Some((color, cursor + 1))
+}
+
+struct Num {
+    value: f64,
+    percent: bool,
+}
+
+fn from_rgb(r: Num, g: Num, b: Num, alpha: Option<Num>) -> Option<FoundColor> {
+    Some(paint(channel(r)?, channel(g)?, channel(b)?, alpha_channel(alpha)?))
+}
+
+fn from_hsl(h: Num, s: Num, l: Num, alpha: Option<Num>) -> Option<FoundColor> {
+    if h.percent || !s.percent || !l.percent {
+        return None;
+    }
+    if !(0.0..=360.0).contains(&h.value) || !(0.0..=100.0).contains(&s.value) || !(0.0..=100.0).contains(&l.value) {
+        return None;
+    }
+    let (r, g, b) = hsl_to_rgb(h.value, s.value / 100.0, l.value / 100.0);
+    Some(paint(r, g, b, alpha_channel(alpha)?))
+}
+
+fn channel(num: Num) -> Option<u8> {
+    if num.percent {
+        if !(0.0..=100.0).contains(&num.value) {
+            return None;
+        }
+        return Some((num.value / 100.0 * 255.0).round() as u8);
+    }
+    if !(0.0..=255.0).contains(&num.value) {
+        return None;
+    }
+    Some(num.value.round() as u8)
+}
+
+fn alpha_channel(alpha: Option<Num>) -> Option<u8> {
+    let Some(num) = alpha else {
+        return Some(255);
+    };
+    if num.percent {
+        if !(0.0..=100.0).contains(&num.value) {
+            return None;
+        }
+        return Some((num.value / 100.0 * 255.0).round() as u8);
+    }
+    if !(0.0..=1.0).contains(&num.value) {
+        return None;
+    }
+    Some((num.value * 255.0).round() as u8)
+}
+
+fn paint(r: u8, g: u8, b: u8, a: u8) -> FoundColor {
+    let (hue, sat, light) = to_hsl(r, g, b);
+    if a == 255 {
+        FoundColor {
+            hex: format!("#{r:02X}{g:02X}{b:02X}"),
+            rgb: format!("rgb({r}, {g}, {b})"),
+            hsl: format!("hsl({hue}, {sat}%, {light}%)"),
+        }
+    } else {
+        let alpha = alpha_text(a);
+        FoundColor {
+            hex: format!("#{r:02X}{g:02X}{b:02X}{a:02X}"),
+            rgb: format!("rgba({r}, {g}, {b}, {alpha})"),
+            hsl: format!("hsla({hue}, {sat}%, {light}%, {alpha})"),
+        }
+    }
+}
+
+fn alpha_text(alpha: u8) -> String {
+    let mut text = format!("{:.2}", alpha as f64 / 255.0);
+    while text.contains('.') && text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    text
+}
+
+fn to_hsl(r: u8, g: u8, b: u8) -> (u16, u16, u16) {
+    let r = r as f64 / 255.0;
+    let g = g as f64 / 255.0;
+    let b = b as f64 / 255.0;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let light = (max + min) / 2.0;
+    let delta = max - min;
+    if delta == 0.0 {
+        return (0, 0, (light * 100.0).round() as u16);
+    }
+    let sat = delta / (1.0 - (2.0 * light - 1.0).abs());
+    let hue = if max == r {
+        let mut turn = (g - b) / delta;
+        if turn < 0.0 {
+            turn += 6.0;
+        }
+        turn
+    } else if max == g {
+        (b - r) / delta + 2.0
+    } else {
+        (r - g) / delta + 4.0
+    };
+    let hue = (hue * 60.0).round() as u16 % 360;
+    (hue, (sat * 100.0).round() as u16, (light * 100.0).round() as u16)
+}
+
+fn hsl_to_rgb(hue: f64, sat: f64, light: f64) -> (u8, u8, u8) {
+    let hue = if hue >= 360.0 { 0.0 } else { hue };
+    let chroma = (1.0 - (2.0 * light - 1.0).abs()) * sat;
+    let x = chroma * (1.0 - ((hue / 60.0) % 2.0 - 1.0).abs());
+    let m = light - chroma / 2.0;
+    let (r, g, b) = match hue {
+        h if h < 60.0 => (chroma, x, 0.0),
+        h if h < 120.0 => (x, chroma, 0.0),
+        h if h < 180.0 => (0.0, chroma, x),
+        h if h < 240.0 => (0.0, x, chroma),
+        h if h < 300.0 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    (
+        ((r + m) * 255.0).round() as u8,
+        ((g + m) * 255.0).round() as u8,
+        ((b + m) * 255.0).round() as u8,
+    )
+}
+
+fn number_at(bytes: &[u8], index: usize) -> Option<(Num, usize)> {
+    let index = skip_ws(bytes, index);
+    let mut end = index;
+    if end < bytes.len() && (bytes[end] == b'+' || bytes[end] == b'-') {
+        end += 1;
+    }
+    let start_digits = end;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    if end < bytes.len() && bytes[end] == b'.' {
+        end += 1;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+    }
+    if end == start_digits || (end == start_digits + 1 && bytes[start_digits] == b'.') {
+        return None;
+    }
+    let value: f64 = std::str::from_utf8(&bytes[index..end]).ok()?.parse().ok()?;
+    let percent = end < bytes.len() && bytes[end] == b'%';
+    if percent {
+        end += 1;
+    }
+    Some((Num { value, percent }, end))
+}
+
+fn separator(bytes: &[u8], index: usize) -> Option<usize> {
+    let next = skip_ws(bytes, index);
+    if next > index {
+        if next < bytes.len() && bytes[next] == b',' {
+            return Some(skip_ws(bytes, next + 1));
+        }
+        return Some(next);
+    }
+    if index < bytes.len() && bytes[index] == b',' {
+        return Some(skip_ws(bytes, index + 1));
+    }
+    None
+}
+
+fn skip_ws(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    index
+}
+
+fn starts_ci(bytes: &[u8], prefix: &[u8]) -> bool {
+    bytes.len() >= prefix.len()
+        && bytes[..prefix.len()]
+            .iter()
+            .zip(prefix)
+            .all(|(got, want)| got.to_ascii_lowercase() == *want)
+}
+
+fn is_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn doubled(digit: u8) -> u8 {
+    let value = hex_val(digit);
+    value * 16 + value
+}
+
+fn pair(high: u8, low: u8) -> u8 {
+    hex_val(high) * 16 + hex_val(low)
+}
+
+fn hex_val(digit: u8) -> u8 {
+    match digit {
+        b'0'..=b'9' => digit - b'0',
+        b'a'..=b'f' => digit - b'a' + 10,
+        _ => digit - b'A' + 10,
+    }
+}
+
 fn contains_word(text: &str, word: &str) -> bool {
     text.match_indices(word).any(|(index, _)| {
         let bytes = text.as_bytes();
@@ -461,7 +785,7 @@ fn is_ident(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{browser_url, classify, present_code};
+    use super::{browser_url, classify, find_colors, present_code};
 
     #[test]
     fn javascript_object_is_code() {
@@ -552,6 +876,22 @@ mod tests {
         let compact = present_code(raw, Some("json"), "compact");
         assert_eq!(compact, "{\"b\":1,\"a\":[2,3]}");
         assert_eq!(present_code(raw, Some("json"), "raw"), raw);
+    }
+
+    #[test]
+    fn colors_inside_text_and_code() {
+        let found = find_colors("{\"accent\":\"#5B6CFF\"}");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].hex, "#5B6CFF");
+        assert_eq!(found[0].rgb, "rgb(91, 108, 255)");
+        assert_eq!(found[0].hsl, "hsl(234, 100%, 68%)");
+        assert_eq!(find_colors("主题色 rgb(91, 108, 255)").len(), 1);
+        assert!(find_colors("订单 #123 已发出").is_empty());
+        assert!(find_colors("rgb(300, 0, 0)").is_empty());
+        let many = find_colors("#112233 #445566 rgb(1, 2, 3) hsl(200, 50%, 40%)");
+        assert_eq!(many.len(), 4);
+        assert_eq!(many[0].hex, "#112233");
+        assert_eq!(many[1].hex, "#445566");
     }
 
     #[test]

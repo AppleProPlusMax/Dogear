@@ -10,9 +10,12 @@ import {
   armWindowDrag,
   clipImage,
   clipThumb,
+  clipColors,
   copyClip,
+  copyPlain,
   openLink,
   previewCode,
+  type FoundColor,
   getEffectState,
   hidePanel,
   listClips,
@@ -54,7 +57,9 @@ const selected = ref(0);
 const notice = ref("");
 const codeView = ref<CodeView>("pretty");
 const shownCode = ref("");
+const colors = ref<FoundColor[]>([]);
 let previewToken = 0;
+let colorToken = 0;
 const searchEl = ref<HTMLInputElement | null>(null);
 /// 图片以 data URL 取回，按条目缓存，避免每次切换选中都重新读盘。
 const thumbs = ref<Record<number, string>>({});
@@ -359,6 +364,34 @@ watch(
   },
 );
 
+watch(
+  [() => current.value?.id, () => current.value?.kind, () => current.value?.content],
+  async () => {
+    const clip = current.value;
+    const token = ++colorToken;
+    if (!clip || (clip.kind !== "text" && clip.kind !== "code")) {
+      colors.value = [];
+      return;
+    }
+    try {
+      const found = await clipColors(clip.id);
+      if (token === colorToken) colors.value = found;
+    } catch {
+      if (token === colorToken) colors.value = [];
+    }
+  },
+);
+
+async function copyColor(rgb: string) {
+  notice.value = "";
+  try {
+    await copyPlain(rgb);
+    notice.value = "已复制 RGB";
+  } catch (err) {
+    notice.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
 watch(selected, () => {
   void loadFullImage();
   nextTick(() => {
@@ -606,6 +639,28 @@ onUnmounted(() => {
             <span><b>{{ lineCount(displayContent) }}</b> 行</span>
             <i></i>
             <span><b>{{ displayContent.length }}</b> 字</span>
+          </div>
+          <div
+            v-if="(current.kind === 'text' || current.kind === 'code') && colors.length"
+            class="spotted"
+            :class="{ many: colors.length > 1 }"
+          >
+            <div class="sec-title">同时识别到</div>
+            <div v-for="color in colors" :key="color.hex" class="card colorcard">
+              <div class="swatch" :style="{ background: color.hex }"></div>
+              <div class="vals">
+                <span>HEX</span><code>{{ color.hex }}</code>
+                <span>RGB</span><code>{{ color.rgb }}</code>
+                <span>HSL</span><code>{{ color.hsl }}</code>
+              </div>
+              <button type="button" class="btn" @click="copyColor(color.rgb)">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="9" y="9" width="13" height="13" rx="2" />
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                </svg>
+                复制 RGB
+              </button>
+            </div>
           </div>
         </template>
 
@@ -1036,6 +1091,86 @@ onUnmounted(() => {
   font-size: 12.5px;
   font-weight: 550;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.btn svg {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.preview > .card {
+  min-height: 96px;
+}
+.spotted {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: none;
+  min-height: 0;
+  max-height: min(220px, 48%);
+  overflow: auto;
+}
+.spotted.many {
+  gap: 6px;
+}
+.spotted.many .card.colorcard {
+  gap: 10px;
+  padding: 8px 10px;
+}
+.spotted.many .swatch {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+}
+.spotted.many .btn {
+  height: 28px;
+  padding: 0 10px;
+}
+.sec-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-3);
+}
+.card.colorcard {
+  flex: none;
+  min-height: 0;
+  overflow: visible;
+  white-space: normal;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px;
+  line-height: 1.4;
+}
+.swatch {
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
+  flex: none;
+  box-shadow: inset 0 0 0 1px var(--card-border);
+}
+.vals {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 3px 12px;
+  font-size: 12px;
+}
+.vals span {
+  color: var(--text-3);
+}
+.vals code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  overflow-wrap: anywhere;
 }
 .btn.pri {
   background: var(--accent);
