@@ -23,6 +23,8 @@ import {
   pasteClip,
   retryOcr,
   type Clip,
+  type ClipsChanged,
+  type OcrUpdate,
 } from "./api";
 
 type FilterId = "all" | "text" | "link" | "image" | "code";
@@ -63,6 +65,10 @@ let colorToken = 0;
 const searchEl = ref<HTMLInputElement | null>(null);
 /// 图片以 data URL 取回，按条目缓存，避免每次切换选中都重新读盘。
 const thumbs = ref<Record<number, string>>({});
+const titleCache = new Map<number, string>();
+const pendingChanges: ClipsChanged[] = [];
+const pendingOcr = new Map<number, OcrUpdate>();
+let historyReady = false;
 const fullImages = ref<Record<number, string>>({});
 let unlisten: UnlistenFn[] = [];
 
@@ -103,8 +109,12 @@ function ocrLabel(clip: Clip) {
 }
 
 function itemTitle(clip: Clip) {
-  if (clip.kind !== "image") return firstLine(clip.content);
-  return imageSize(clip);
+  if (clip.kind === "image") return imageSize(clip);
+  const cached = titleCache.get(clip.id);
+  if (cached !== undefined) return cached;
+  const line = firstLine(clip.content);
+  titleCache.set(clip.id, line);
+  return line;
 }
 
 function itemSub(clip: Clip) {
@@ -151,6 +161,55 @@ async function refresh() {
   if (selected.value >= filtered.value.length) selected.value = 0;
   void loadThumbs();
   void loadFullImage();
+}
+
+function applySteps(steps: ClipsChanged["steps"]) {
+  if (steps.length === 0) return;
+  const next = clips.value.slice();
+  for (const step of steps) {
+    for (const id of step.removedIds) {
+      const index = next.findIndex((clip) => clip.id === id);
+      if (index >= 0) next.splice(index, 1);
+      titleCache.delete(id);
+      pendingOcr.delete(id);
+    }
+    const index = next.findIndex((clip) => clip.id === step.clip.id);
+    if (index >= 0) next.splice(index, 1);
+    const earlier = pendingOcr.get(step.clip.id);
+    if (earlier) {
+      step.clip.ocrStatus = earlier.ocrStatus;
+      step.clip.ocrText = earlier.ocrText;
+      step.clip.ocrLang = earlier.ocrLang;
+      pendingOcr.delete(step.clip.id);
+    }
+    next.unshift(step.clip);
+    if (step.clip.kind !== "image") titleCache.set(step.clip.id, firstLine(step.clip.content));
+  }
+  clips.value = next;
+  if (selected.value >= filtered.value.length) selected.value = 0;
+  void loadThumbs();
+  void loadFullImage();
+}
+
+function onClipsChanged(payload: ClipsChanged) {
+  pendingChanges.push(payload);
+  if (!historyReady) return;
+  const batch = pendingChanges.splice(0);
+  applySteps(batch.flatMap((item) => item.steps));
+}
+
+function applyOcr(update: OcrUpdate) {
+  const clip = clips.value.find((item) => item.id === update.id);
+  if (!clip) return false;
+  clip.ocrStatus = update.ocrStatus;
+  clip.ocrText = update.ocrText;
+  clip.ocrLang = update.ocrLang;
+  pendingOcr.delete(update.id);
+  return true;
+}
+
+function onOcrUpdated(update: OcrUpdate) {
+  if (!historyReady || !applyOcr(update)) pendingOcr.set(update.id, update);
 }
 
 async function loadThumbs() {
@@ -241,8 +300,15 @@ async function recognizeSelected() {
   if (!clip || clip.kind !== "image") return;
   notice.value = "";
   try {
-    await retryOcr(clip.id);
-    await refresh();
+    const previousStatus = clip.ocrStatus;
+    const previousText = clip.ocrText;
+    clip.ocrStatus = "pending";
+    clip.ocrText = null;
+    await retryOcr(clip.id).catch((err) => {
+      clip.ocrStatus = previousStatus;
+      clip.ocrText = previousText;
+      throw err;
+    });
   } catch (err) {
     notice.value = err instanceof Error ? err.message : String(err);
   }
@@ -315,8 +381,21 @@ function onDragPointerDown(event: MouseEvent) {
 }
 
 function firstLine(content: string) {
-  const line = content.split(/\r?\n/).find((item) => item.trim()) ?? "";
-  return line.trim();
+  let start = 0;
+  while (start < content.length) {
+    const code = content.charCodeAt(start);
+    if (code !== 32 && code !== 9 && code !== 10 && code !== 13) break;
+    start++;
+  }
+  if (start >= content.length) return "";
+  let end = start;
+  const limit = Math.min(content.length, start + 200);
+  while (end < limit) {
+    const code = content.charCodeAt(end);
+    if (code === 10 || code === 13) break;
+    end++;
+  }
+  return content.slice(start, end).trim();
 }
 
 function dayLabel(createdAt: number) {
@@ -339,7 +418,16 @@ function relativeTime(createdAt: number) {
 }
 
 function lineCount(content: string) {
-  return content.split(/\r?\n/).length;
+  let count = 1;
+  for (let index = 0; index < content.length; index++) {
+    const code = content.charCodeAt(index);
+    if (code === 10) count++;
+    else if (code === 13) {
+      count++;
+      if (content.charCodeAt(index + 1) === 10) index++;
+    }
+  }
+  return count;
 }
 
 watch(
@@ -399,18 +487,12 @@ onMounted(async () => {
   window.addEventListener("keydown", onEscape, true);
   if (!("__TAURI_INTERNALS__" in window)) return;
   window.addEventListener("mousedown", onDragPointerDown, true);
-  await Promise.all([
-    refresh(),
-    getEffectState().then((effect) => {
-      document.documentElement.dataset.effect = effect.effect;
-    }),
-  ]);
   unlisten = [
-    await listen("clip-added", () => {
-      void refresh();
+    await listen<ClipsChanged>("clips-changed", (event) => {
+      onClipsChanged(event.payload);
     }),
-    await listen("ocr-updated", () => {
-      void refresh();
+    await listen<OcrUpdate>("ocr-updated", (event) => {
+      onOcrUpdated(event.payload);
     }),
     await listen("window-shown", () => {
       view.value = "history";
@@ -427,6 +509,16 @@ onMounted(async () => {
       document.documentElement.dataset.effect = event.payload.effect;
     }),
   ];
+  await Promise.all([
+    refresh(),
+    getEffectState().then((effect) => {
+      document.documentElement.dataset.effect = effect.effect;
+    }),
+  ]);
+  historyReady = true;
+  const batch = pendingChanges.splice(0);
+  applySteps(batch.flatMap((item) => item.steps));
+  for (const update of [...pendingOcr.values()]) applyOcr(update);
   focusSearch();
 });
 

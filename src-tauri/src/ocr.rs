@@ -90,7 +90,12 @@ fn recognize_clip(app: &AppHandle, id: i64) {
             Err(err) if err.is_empty() => clip.ocr_status = "empty".into(),
             Err(_) => clip.ocr_status = "failed".into(),
         }
-        clip.ocr_status.clone()
+        OcrUpdate {
+            id,
+            ocr_status: clip.ocr_status.clone(),
+            ocr_text: clip.ocr_text.clone(),
+            ocr_lang: clip.ocr_lang.clone(),
+        }
     };
 
     match &outcome {
@@ -104,6 +109,15 @@ fn recognize_clip(app: &AppHandle, id: i64) {
         Err(err) => eprintln!("图片文字识别失败: {err}"),
     }
     let _ = app.emit("ocr-updated", status);
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OcrUpdate {
+    id: i64,
+    ocr_status: String,
+    ocr_text: Option<String>,
+    ocr_lang: Option<String>,
 }
 
 pub fn recognize_png(path: &Path) -> Result<OcrReport, String> {

@@ -16,6 +16,22 @@ export interface Clip {
   ocrLang: string | null;
 }
 
+export interface ClipStep {
+  clip: Clip;
+  removedIds: number[];
+}
+
+export interface ClipsChanged {
+  steps: ClipStep[];
+}
+
+export interface OcrUpdate {
+  id: number;
+  ocrStatus: OcrStatus;
+  ocrText: string | null;
+  ocrLang: string | null;
+}
+
 export interface EffectState {
   effect: string;
   transparencyEnabled: boolean;
