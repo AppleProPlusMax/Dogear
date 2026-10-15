@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
+import { getVersion } from "@tauri-apps/api/app";
 import type { ThemePreference } from "../api";
 import { useSettingsStore, type ShortcutField } from "../stores/settings";
 import WindowControls from "../components/WindowControls.vue";
 
 const emit = defineEmits<{ back: [] }>();
 const store = useSettingsStore();
+const version = ref("");
 
 const themes: { id: ThemePreference; label: string }[] = [
   { id: "system", label: "跟随系统" },
@@ -93,6 +95,11 @@ function toggle(field: "launchAtLogin" | "pauseRecording" | "reduceTransparency"
 
 onMounted(() => {
   window.addEventListener("keydown", onCaptureKey, true);
+  if ("__TAURI_INTERNALS__" in window) {
+    void getVersion().then((value) => {
+      version.value = value;
+    });
+  }
 });
 
 onUnmounted(() => {
@@ -269,6 +276,7 @@ onUnmounted(() => {
       </section>
 
       <p v-if="store.error" class="error">{{ store.error }}</p>
+      <p v-if="version" class="version">版本 {{ version }}</p>
     </div>
   </main>
 </template>
@@ -340,8 +348,14 @@ onUnmounted(() => {
 }
 .body {
   flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   overflow: auto;
   padding: 8px 20px 20px;
+}
+section {
+  flex: none;
 }
 section + section {
   margin-top: 18px;
@@ -453,5 +467,13 @@ kbd {
 .error {
   color: var(--text);
   margin-top: 12px;
+}
+.version {
+  flex: none;
+  margin: auto 0 0;
+  padding-top: 28px;
+  text-align: center;
+  color: var(--text-3);
+  font-size: 12px;
 }
 </style>
