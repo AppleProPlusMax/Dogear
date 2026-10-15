@@ -72,11 +72,11 @@ pub fn begin(app: &AppHandle) {
     }
     let app = app.clone();
     thread::spawn(move || {
-        let visible = app
-            .get_webview_window("main")
-            .and_then(|window| window.is_visible().ok())
-            .unwrap_or(false);
-        if visible {
+        let Some(plan) = prepare(&app) else {
+            BUSY.store(false, Ordering::SeqCst);
+            return;
+        };
+        if plan.on_screen {
             panel::hide(&app);
             // 等面板从屏幕上消失，避免框选层或截图像素里带上它。
             thread::sleep(Duration::from_millis(60));
@@ -84,35 +84,76 @@ pub fn begin(app: &AppHandle) {
 
         let outcome = std::panic::catch_unwind(|| unsafe { select_region() });
         match outcome {
-            Ok(Ok(Some(shot))) => match grab_and_store(&app, &shot) {
-                Ok(()) => panel::open(&app),
-                Err(err) => {
+            Ok(Ok(Some(shot))) => {
+                if let Err(err) = grab_and_store(&app, &shot) {
                     eprintln!("截图保存失败: {err}");
-                    if visible {
-                        panel::open(&app);
-                    }
-                }
-            },
-            Ok(Ok(None)) => {
-                if visible {
-                    panel::open(&app);
                 }
             }
-            Ok(Err(err)) => {
-                eprintln!("截图失败: {err}");
-                if visible {
-                    panel::open(&app);
-                }
-            }
-            Err(_) => {
-                eprintln!("截图中断");
-                if visible {
-                    panel::open(&app);
-                }
-            }
+            Ok(Ok(None)) => {}
+            Ok(Err(err)) => eprintln!("截图失败: {err}"),
+            Err(_) => eprintln!("截图中断"),
         }
+        restore_panel(&app, plan);
         BUSY.store(false, Ordering::SeqCst);
     });
+}
+
+struct CapturePlan {
+    on_screen: bool,
+    auto_hide: bool,
+}
+
+/// 截图结束后面板怎么回来。
+/// 开始时不在屏幕上：保持收起，避免盖住正在粘贴的窗口。
+/// 自动隐藏开着且当时开着：按呼出打开。失焦本来就会收起，截完回到弹出层。
+/// 自动隐藏关着且当时开着：原位置显示。失焦不该收起，藏起来只是为了不进画面。
+#[derive(Debug, PartialEq, Eq)]
+enum AfterCapture {
+    StayHidden,
+    Summon,
+    RevealInPlace,
+}
+
+fn after_capture(on_screen: bool, auto_hide: bool) -> AfterCapture {
+    if !on_screen {
+        return AfterCapture::StayHidden;
+    }
+    if auto_hide {
+        AfterCapture::Summon
+    } else {
+        AfterCapture::RevealInPlace
+    }
+}
+
+fn prepare(app: &AppHandle) -> Option<CapturePlan> {
+    let window = app.get_webview_window("main")?;
+    let on_screen = window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(false);
+    let state = app.try_state::<std::sync::Mutex<crate::state::AppState>>()?;
+    let mut guard = state.lock().ok()?;
+    guard.capture_active = true;
+    Some(CapturePlan {
+        on_screen,
+        auto_hide: guard.settings.auto_hide,
+    })
+}
+
+fn restore_panel(app: &AppHandle, plan: CapturePlan) {
+    match after_capture(plan.on_screen, plan.auto_hide) {
+        AfterCapture::StayHidden => {}
+        AfterCapture::Summon => panel::open(app),
+        AfterCapture::RevealInPlace => panel::reveal_in_place(app),
+    }
+    let Some(state) = app.try_state::<std::sync::Mutex<crate::state::AppState>>() else {
+        return;
+    };
+    let Ok(mut guard) = state.lock() else {
+        return;
+    };
+    guard.capture_active = false;
+    if plan.on_screen {
+        // 截图层关掉时还会再送一次失焦，留出时间，避免弹出层刚回来又被收起。
+        guard.ignore_blur_until = crate::state::now_ms() + 800;
+    }
 }
 
 fn grab_and_store(app: &AppHandle, shot: &Shot) -> Result<(), String> {
@@ -536,11 +577,19 @@ unsafe fn copy_screen(shot: &Shot) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::accepted;
+    use super::{accepted, after_capture, AfterCapture};
 
     #[test]
     fn tiny_drag_is_cancelled_and_a_real_drag_keeps_its_box() {
         assert!(accepted((10, 10), (14, 30)).is_none());
         assert_eq!(accepted((40, 20), (10, 50)), Some((10, 20, 30, 30)));
+    }
+
+    #[test]
+    fn blur_hide_only_changes_how_an_open_panel_returns() {
+        assert_eq!(after_capture(true, true), AfterCapture::Summon);
+        assert_eq!(after_capture(true, false), AfterCapture::RevealInPlace);
+        assert_eq!(after_capture(false, true), AfterCapture::StayHidden);
+        assert_eq!(after_capture(false, false), AfterCapture::StayHidden);
     }
 }

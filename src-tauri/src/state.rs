@@ -16,7 +16,7 @@ pub struct Clip {
     pub file_path: Option<String>,
     #[serde(skip)]
     pub thumb_path: Option<String>,
-    /// 图片内容哈希，用于去重。
+    /// 内容哈希，文字和图片都用来去重。
     #[serde(skip)]
     pub hash: Option<String>,
     pub width: Option<u32>,
@@ -58,6 +58,8 @@ pub struct AppState {
     pub settings: Settings,
     /// 正在录制新快捷键。这段时间里用户快捷键先卸掉，避免按下时把窗口关掉。
     pub shortcut_capture: bool,
+    /// 正在框选截图。这段失焦来自截图层，不是用户点到了外面。
+    pub capture_active: bool,
 }
 
 impl Default for AppState {
@@ -71,6 +73,7 @@ impl Default for AppState {
             effect: EffectState::unknown(),
             settings: Settings::default(),
             shortcut_capture: false,
+            capture_active: false,
         }
     }
 }

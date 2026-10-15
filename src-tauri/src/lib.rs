@@ -124,10 +124,20 @@ pub fn run() {
                     let Some(state) = blur_handle.try_state::<Mutex<AppState>>() else {
                         return;
                     };
-                    let (until, auto_hide) = state
+                    let (until, auto_hide, capturing) = state
                         .lock()
-                        .map(|guard| (guard.ignore_blur_until, guard.settings.auto_hide))
-                        .unwrap_or((0, false));
+                        .map(|guard| {
+                            (
+                                guard.ignore_blur_until,
+                                guard.settings.auto_hide,
+                                guard.capture_active,
+                            )
+                        })
+                        .unwrap_or((0, false, false));
+                    // 截图层会抢走焦点。自动隐藏开着时，这次失焦不能当成用户离开。
+                    if capturing {
+                        return;
+                    }
                     if !auto_hide {
                         return;
                     }

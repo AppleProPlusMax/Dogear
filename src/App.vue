@@ -282,10 +282,6 @@ watch(() => settingsStore.guideOpen, (open) => {
   else focusSearch();
 });
 
-function shortcutParts(shortcut: string) {
-  return shortcut.split("+").filter(Boolean);
-}
-
 function onEscape(event: KeyboardEvent) {
   if (event.key !== "Escape") return;
   if (settingsStore.capturing || settingsStore.guideOpen) return;
@@ -463,6 +459,18 @@ onUnmounted(() => {
               <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
             </svg>
           </button>
+          <button
+            type="button"
+            class="gear"
+            aria-label="截图"
+            :title="`截图 ${settingsStore.settings.captureShortcut}`"
+            @click="captureScreen"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M7 3H5a2 2 0 0 0-2 2v2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2" />
+              <circle cx="12" cy="12" r="3.2" />
+            </svg>
+          </button>
           <button type="button" class="gear" aria-label="设置" @click="view = 'settings'">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <circle cx="12" cy="12" r="3" />
@@ -509,14 +517,6 @@ onUnmounted(() => {
             {{ item.label }} <em>{{ countOf(item.id) }}</em>
           </button>
         </div>
-        <button type="button" class="capture" @click="captureScreen">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M7 3H5a2 2 0 0 0-2 2v2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2" />
-            <circle cx="12" cy="12" r="3.2" />
-          </svg>
-          截图
-          <kbd v-for="part in shortcutParts(settingsStore.settings.captureShortcut)" :key="part">{{ part }}</kbd>
-        </button>
       </div>
     </header>
 
@@ -839,40 +839,6 @@ onUnmounted(() => {
   cursor: grab;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.capture {
-  -webkit-app-region: no-drag;
-  app-region: no-drag;
-  cursor: pointer;
-  height: 34px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: none;
-  padding: 0 8px 0 11px;
-  border: 0;
-  border-radius: 10px;
-  background: var(--seg-thumb);
-  color: var(--text);
-  font: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  box-shadow: 0 0 0 1.5px var(--accent), 0 6px 16px var(--accent-ring);
-}
-.capture svg {
-  width: 15px;
-  height: 15px;
-  stroke: var(--accent);
-  fill: none;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-.capture kbd {
-  padding: 0 5px;
-  line-height: 18px;
 }
 .seg {
   display: inline-flex;

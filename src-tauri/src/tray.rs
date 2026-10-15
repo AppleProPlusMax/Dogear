@@ -20,10 +20,11 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .and_then(|state| state.lock().ok().map(|guard| guard.settings.pause_recording))
         .unwrap_or(false);
     let open = MenuItem::with_id(app, "open", "打开", true, None::<&str>)?;
+    let capture = MenuItem::with_id(app, "capture", "截图", true, None::<&str>)?;
     let pause = CheckMenuItem::with_id(app, "pause", "暂停记录", true, paused, None::<&str>)?;
     let settings_item = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &pause, &settings_item, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &capture, &pause, &settings_item, &quit])?;
     let _ = PAUSE.set(pause);
     let tray = TrayIconBuilder::with_id("dogear")
         .icon(dogear_icon()?)
@@ -32,6 +33,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => panel::open(app),
+            "capture" => crate::capture::begin(app),
             "pause" => toggle_pause(app),
             "settings" => panel::open_settings(app),
             "quit" => app.exit(0),

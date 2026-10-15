@@ -130,6 +130,25 @@ fn show(app: &AppHandle, window: &tauri::WebviewWindow) {
     present(app, window, true);
 }
 
+/// 常驻窗口为了不进截图而临时藏起之后，在原位置显示。不挪到光标，也不重置搜索。
+pub fn reveal_in_place(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if window.is_minimized().unwrap_or(false) {
+        return;
+    }
+    if let Some(state) = app.try_state::<Mutex<AppState>>() {
+        if let Ok(mut guard) = state.lock() {
+            guard.ignore_blur_until = state::now_ms() + 400;
+        }
+    }
+    let _ = window.show();
+    focus_window(&window);
+    let _ = window.set_focus();
+    set_escape(app, true);
+}
+
 fn restore_minimized(app: &AppHandle, window: &tauri::WebviewWindow) {
     arm_blur_grace(app);
     let _ = window.unminimize();
@@ -277,7 +296,7 @@ fn left_button_down() -> bool {
 }
 
 #[tauri::command]
-pub fn list_clips(state: State<'_, Mutex<AppState>>) -> Result<Vec<crate::state::Clip>, String> {
+pub async fn list_clips(state: State<'_, Mutex<AppState>>) -> Result<Vec<crate::state::Clip>, String> {
     let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
     Ok(guard.clips.clone())
 }
