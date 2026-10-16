@@ -7,9 +7,8 @@ import "./styles/tokens.css";
 const app = createApp(App);
 const pinia = createPinia();
 app.use(pinia);
+app.mount("#app");
 
 if ("__TAURI_INTERNALS__" in window) {
-  await useSettingsStore().load();
+  void useSettingsStore().load();
 }
-
-app.mount("#app");

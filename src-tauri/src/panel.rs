@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Size, State};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{
@@ -146,6 +146,7 @@ pub fn reveal_in_place(app: &AppHandle) {
     let _ = window.show();
     focus_window(&window);
     let _ = window.set_focus();
+    nudge_surface(&window);
     set_escape(app, true);
 }
 
@@ -155,6 +156,7 @@ fn restore_minimized(app: &AppHandle, window: &tauri::WebviewWindow) {
     let _ = window.show();
     focus_window(window);
     let _ = window.set_focus();
+    nudge_surface(window);
     set_escape(app, true);
 }
 
@@ -174,6 +176,26 @@ fn arm_blur_grace(app: &AppHandle) {
     }
 }
 
+/// 窗口创建时是隐藏的。部分机器上 WebView2 显示后仍停在空的毛玻璃上，改一次尺寸才会把页面画出来。
+pub fn nudge_surface(window: &tauri::WebviewWindow) {
+    let window = window.clone();
+    thread::spawn(move || {
+        thread::sleep(std::time::Duration::from_millis(48));
+        let Ok(size) = window.inner_size() else {
+            return;
+        };
+        if size.width < 32 || size.height < 32 {
+            return;
+        }
+        let bumped = PhysicalSize {
+            width: size.width + 1,
+            height: size.height,
+        };
+        let _ = window.set_size(Size::Physical(bumped));
+        let _ = window.set_size(Size::Physical(size));
+    });
+}
+
 fn focus_window(window: &tauri::WebviewWindow) {
     if let Ok(hwnd) = window.hwnd() {
         unsafe { paste::focus_window(HWND(hwnd.0)) };
@@ -187,6 +209,7 @@ fn present(app: &AppHandle, window: &tauri::WebviewWindow, announce_history: boo
     focus_window(window);
     let _ = window.set_focus();
     apply_system_corners(window);
+    nudge_surface(window);
     set_escape(app, true);
     if announce_history {
         let _ = app.emit("window-shown", ());
