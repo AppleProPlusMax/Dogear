@@ -45,6 +45,8 @@
     ],
     "windows": {
       "wix": {
+        "upgradeCode": "c691d07c-e3fc-53a5-a2e6-66af5a3dc3ae",
+        "template": "wix/main.wxs",
         "language": {
           "zh-CN": {
             "localePath": "wix/zh-CN.wxl"
