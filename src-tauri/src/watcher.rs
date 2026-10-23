@@ -17,7 +17,7 @@ use crate::clipboard::{self, ClipboardRead};
 use crate::detect::Detection;
 use crate::state::{self, AppState, Clip};
 
-const HISTORY_LIMIT: usize = 200;
+pub const HISTORY_LIMIT: usize = 200;
 /// 连着复制时先在后台记完，界面大约每 50 毫秒合并刷新一次。
 const FLUSH_AFTER: Duration = Duration::from_millis(50);
 
@@ -176,6 +176,7 @@ pub(crate) fn record_image(app: &AppHandle, png: &[u8], hash: &str) {
             guard.clips.retain(|clip| clip.id != id);
             guard.clips.insert(0, updated.clone());
             drop(guard);
+            crate::storage::touch_clip(id, now);
             eprintln!("剪切板图片已存在，挪到最前");
             notify(ClipStep {
                 clip: updated,
@@ -217,12 +218,14 @@ pub(crate) fn record_image(app: &AppHandle, png: &[u8], hash: &str) {
             ocr_lang: None,
         },
     );
-    let removed_ids = trim_history(&mut guard);
+    let (removed_ids, evicted_hashes) = trim_history(&mut guard);
     let clip = guard.clips.first().cloned();
     drop(guard);
 
     eprintln!("已记录剪切板图片，{}×{}", saved.width, saved.height);
     if let Some(clip) = clip {
+        crate::storage::save_step(&clip, &removed_ids);
+        crate::images::remove_hashes(app, &evicted_hashes);
         notify(ClipStep { clip, removed_ids });
     }
     if ocr_auto {
@@ -244,15 +247,23 @@ fn record_text(app: &AppHandle, text: String) {
     let Ok(mut guard) = state.lock() else {
         return;
     };
-    let step = insert_text(&mut guard, text, now, digest, detected);
+    let (step, evicted_hashes) = insert_text(&mut guard, text, now, digest, detected);
     let chars = step.clip.content.chars().count();
     let kind = step.clip.kind.clone();
     drop(guard);
+    crate::storage::save_step(&step.clip, &step.removed_ids);
+    crate::images::remove_hashes(app, &evicted_hashes);
     eprintln!("已记录剪切板文本，长度 {chars} 字，类型 {kind}");
     notify(step);
 }
 
-fn insert_text(guard: &mut AppState, text: String, now: i64, digest: String, detected: Detection) -> ClipStep {
+fn insert_text(
+    guard: &mut AppState,
+    text: String,
+    now: i64,
+    digest: String,
+    detected: Detection,
+) -> (ClipStep, Vec<String>) {
     if let Some(index) = guard.clips.iter().position(|clip| {
         clip.kind != "image" && clip.hash.as_deref() == Some(digest.as_str()) && clip.content == text
     }) {
@@ -260,10 +271,13 @@ fn insert_text(guard: &mut AppState, text: String, now: i64, digest: String, det
         existing.created_at = now;
         let clip = existing.clone();
         guard.clips.insert(0, existing);
-        return ClipStep {
-            clip,
-            removed_ids: Vec::new(),
-        };
+        return (
+            ClipStep {
+                clip,
+                removed_ids: Vec::new(),
+            },
+            Vec::new(),
+        );
     }
     let mut clip = Clip::text(
         guard.next_id,
@@ -275,8 +289,8 @@ fn insert_text(guard: &mut AppState, text: String, now: i64, digest: String, det
     clip.hash = Some(digest);
     guard.next_id += 1;
     guard.clips.insert(0, clip.clone());
-    let removed_ids = trim_history(guard);
-    ClipStep { clip, removed_ids }
+    let (removed_ids, evicted_hashes) = trim_history(guard);
+    (ClipStep { clip, removed_ids }, evicted_hashes)
 }
 
 fn recording_paused(app: &AppHandle) -> bool {
@@ -285,16 +299,28 @@ fn recording_paused(app: &AppHandle) -> bool {
         .unwrap_or(false)
 }
 
-fn trim_history(guard: &mut AppState) -> Vec<i64> {
+fn trim_history(guard: &mut AppState) -> (Vec<i64>, Vec<String>) {
     if guard.clips.len() <= HISTORY_LIMIT {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
-    guard
-        .clips
-        .split_off(HISTORY_LIMIT)
-        .into_iter()
-        .map(|clip| clip.id)
-        .collect()
+    let removed = guard.clips.split_off(HISTORY_LIMIT);
+    let mut removed_ids = Vec::with_capacity(removed.len());
+    let mut evicted_hashes = Vec::new();
+    for clip in removed {
+        removed_ids.push(clip.id);
+        if clip.kind == "image" {
+            if let Some(hash) = clip.hash {
+                let still_used = guard
+                    .clips
+                    .iter()
+                    .any(|item| item.kind == "image" && item.hash.as_deref() == Some(hash.as_str()));
+                if !still_used {
+                    evicted_hashes.push(hash);
+                }
+            }
+        }
+    }
+    (removed_ids, evicted_hashes)
 }
 
 #[cfg(test)]
@@ -305,7 +331,7 @@ mod tests {
     use crate::state::{AppState, Clip};
 
     fn store(guard: &mut AppState, text: &str, now: i64) -> i64 {
-        let step = insert_text(
+        let (step, _) = insert_text(
             guard,
             text.to_string(),
             now,
@@ -340,13 +366,42 @@ mod tests {
         }
         let removed = {
             let digest = hash(b"newer");
-            let step = insert_text(&mut guard, "newer".into(), 999, digest, classify("newer"));
+            let (step, _) = insert_text(&mut guard, "newer".into(), 999, digest, classify("newer"));
             step.removed_ids
         };
         assert_eq!(removed, vec![oldest]);
         assert_eq!(guard.clips.len(), HISTORY_LIMIT);
         assert_eq!(guard.clips[0].content, "newer");
         assert!(guard.clips.iter().all(|clip: &Clip| clip.id != oldest));
-        assert!(trim_history(&mut guard).is_empty());
+        assert!(trim_history(&mut guard).0.is_empty());
+    }
+
+    #[test]
+    fn evicting_image_reports_its_hash_for_cleanup() {
+        let mut guard = AppState::default();
+        guard.clips.push(Clip {
+            id: 1,
+            content: String::new(),
+            created_at: 1,
+            kind: "image".into(),
+            language: None,
+            file_path: Some("old.png".into()),
+            thumb_path: Some("old-thumb.png".into()),
+            hash: Some("old-img-hash".into()),
+            width: Some(10),
+            height: Some(10),
+            ocr_status: "none".into(),
+            ocr_text: None,
+            ocr_lang: None,
+        });
+        guard.next_id = 2;
+        for index in 1..HISTORY_LIMIT {
+            store(&mut guard, &format!("item-{index}"), index as i64);
+        }
+        let digest = hash(b"overflow");
+        let (step, evicted_hashes) =
+            insert_text(&mut guard, "overflow".into(), 999, digest, classify("overflow"));
+        assert_eq!(step.removed_ids, vec![1]);
+        assert_eq!(evicted_hashes, vec!["old-img-hash".to_string()]);
     }
 }

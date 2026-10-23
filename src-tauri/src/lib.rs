@@ -8,6 +8,7 @@ mod panel;
 mod paste;
 mod settings;
 mod state;
+mod storage;
 mod tray;
 mod watcher;
 
@@ -88,6 +89,18 @@ pub fn run() {
                 .get_webview_window("main")
                 .ok_or("缺少主窗口 main")?;
             let loaded = settings::load();
+            let mut history = storage::init(app.handle(), watcher::HISTORY_LIMIT);
+            let mut pending_ocr = Vec::new();
+            for clip in &mut history.clips {
+                if clip.kind == "image" && clip.ocr_status == "pending" {
+                    if loaded.ocr_auto {
+                        pending_ocr.push(clip.id);
+                    } else {
+                        clip.ocr_status = "none".into();
+                        storage::update_ocr(clip.id, "none", None, None);
+                    }
+                }
+            }
             let effect = effects::apply(&window, loaded.reduce_transparency);
             panel::apply_system_corners(&window);
             eprintln!(
@@ -99,6 +112,8 @@ pub fn run() {
                 effect.detail
             );
             app.manage(Mutex::new(AppState {
+                clips: history.clips,
+                next_id: history.next_id,
                 effect,
                 settings: loaded.clone(),
                 ..AppState::default()
@@ -167,6 +182,9 @@ pub fn run() {
             }
             register_shortcut(app.handle())?;
             ocr::start_queue(app.handle().clone());
+            for id in pending_ocr {
+                ocr::enqueue(id);
+            }
             watcher::start(app.handle().clone());
             Ok(())
         })

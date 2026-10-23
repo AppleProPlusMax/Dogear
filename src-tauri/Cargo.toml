@@ -20,6 +20,7 @@ tauri-plugin-single-instance = "2"
 tauri-utils = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 winreg = "0.55"
 windows = { version = "0.61", features = [
   "Media_Ocr",

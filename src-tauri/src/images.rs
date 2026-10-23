@@ -207,6 +207,77 @@ fn image_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|err| format!("无法定位数据目录: {err}"))
 }
 
+/// 淘汰旧记录时顺手删掉不再被引用的原图与缩略图。
+pub fn remove_hashes(app: &AppHandle, hashes: &[String]) {
+    if hashes.is_empty() {
+        return;
+    }
+    let Ok(dir) = image_dir(app) else {
+        return;
+    };
+    remove_hashes_in(&dir, hashes);
+}
+
+fn remove_hashes_in(dir: &Path, hashes: &[String]) {
+    for hash in hashes {
+        let _ = std::fs::remove_file(dir.join(format!("{hash}.png")));
+        let _ = std::fs::remove_file(dir.join(format!("{hash}-thumb.png")));
+    }
+}
+
+/// 启动时扫描图片目录，清理所有不在当前历史记录里的孤儿 PNG 文件。
+pub fn cleanup_orphans(app: &AppHandle, clips: &[crate::state::Clip]) {
+    let Ok(dir) = image_dir(app) else {
+        return;
+    };
+    let removed = cleanup_orphans_in(&dir, clips);
+    if removed > 0 {
+        eprintln!("已清理 {removed} 个孤儿图片文件");
+    }
+}
+
+fn cleanup_orphans_in(dir: &Path, clips: &[crate::state::Clip]) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut kept = std::collections::HashSet::new();
+    for clip in clips {
+        if clip.kind != "image" {
+            continue;
+        }
+        if let Some(hash) = clip.hash.as_deref() {
+            kept.insert(format!("{hash}.png"));
+            kept.insert(format!("{hash}-thumb.png"));
+        }
+        for path in [clip.file_path.as_deref(), clip.thumb_path.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(name) = Path::new(path).file_name().and_then(|n| n.to_str()) {
+                kept.insert(name.to_string());
+            }
+        }
+    }
+
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("png") {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !kept.contains(name) && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// 用于去重与文件名，不用于安全校验，所以 FNV-1a 足够。
 pub fn hash(bytes: &[u8]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -243,7 +314,8 @@ fn base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{base64, decode, encode, hash};
+    use super::{base64, cleanup_orphans_in, decode, encode, hash, remove_hashes_in};
+    use crate::state::Clip;
 
     #[test]
     fn base64_matches_known_values() {
@@ -274,5 +346,43 @@ mod tests {
         let decoded = decode(&png).expect("解码应当成功");
         assert_eq!((decoded.width, decoded.height), (2, 2));
         assert_eq!(decoded.bgra, bgra);
+    }
+
+    #[test]
+    fn orphan_cleanup_removes_unreferenced_pngs_only() {
+        let dir = std::env::temp_dir().join(format!("dogear-img-test-{}", crate::state::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("keep1.png"), b"png").unwrap();
+        std::fs::write(dir.join("keep1-thumb.png"), b"png").unwrap();
+        std::fs::write(dir.join("stale.png"), b"png").unwrap();
+        std::fs::write(dir.join("stale-thumb.png"), b"png").unwrap();
+
+        let kept_clip = Clip {
+            id: 1,
+            content: String::new(),
+            created_at: 1,
+            kind: "image".into(),
+            language: None,
+            file_path: Some(dir.join("keep1.png").to_string_lossy().into_owned()),
+            thumb_path: Some(dir.join("keep1-thumb.png").to_string_lossy().into_owned()),
+            hash: Some("keep1".into()),
+            width: Some(10),
+            height: Some(10),
+            ocr_status: "none".into(),
+            ocr_text: None,
+            ocr_lang: None,
+        };
+
+        let removed = cleanup_orphans_in(&dir, &[kept_clip]);
+        assert_eq!(removed, 2);
+        assert!(dir.join("keep1.png").exists());
+        assert!(dir.join("keep1-thumb.png").exists());
+        assert!(!dir.join("stale.png").exists());
+        assert!(!dir.join("stale-thumb.png").exists());
+
+        remove_hashes_in(&dir, &["keep1".to_string()]);
+        assert!(!dir.join("keep1.png").exists());
+        assert!(!dir.join("keep1-thumb.png").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

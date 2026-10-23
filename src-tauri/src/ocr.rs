@@ -108,6 +108,12 @@ fn recognize_clip(app: &AppHandle, id: i64) {
         Err(err) if err.is_empty() => eprintln!("图片太小，跳过文字识别"),
         Err(err) => eprintln!("图片文字识别失败: {err}"),
     }
+    crate::storage::update_ocr(
+        status.id,
+        &status.ocr_status,
+        status.ocr_text.as_deref(),
+        status.ocr_lang.as_deref(),
+    );
     let _ = app.emit("ocr-updated", status);
 }
 

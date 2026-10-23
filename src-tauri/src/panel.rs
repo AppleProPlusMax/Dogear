@@ -353,6 +353,7 @@ pub fn retry_ocr(state: State<'_, Mutex<AppState>>, id: i64) -> Result<(), Strin
         clip.ocr_status = "pending".into();
         clip.ocr_text = None;
     }
+    crate::storage::update_ocr(id, "pending", None, None);
     crate::ocr::enqueue(id);
     Ok(())
 }
