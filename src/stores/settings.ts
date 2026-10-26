@@ -25,6 +25,9 @@ const defaults: Settings = {
   pinned: false,
   guideSeen: false,
   language: "zh-CN",
+  ignoredApps: [],
+  historyLimit: 200,
+  showSource: true,
 };
 
 export type ShortcutField = "summon" | "capture";

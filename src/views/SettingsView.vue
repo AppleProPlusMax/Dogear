@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { getVersion } from "@tauri-apps/api/app";
+import { clearClips } from "../api";
 import { useSettingsStore, type ShortcutField } from "../stores/settings";
 import { useI18n, type AppLocale } from "../i18n";
 import WindowControls from "../components/WindowControls.vue";
@@ -9,6 +10,12 @@ const emit = defineEmits<{ back: [] }>();
 const store = useSettingsStore();
 const { t } = useI18n();
 const version = ref("");
+const ignoreDraft = ref("");
+const clearArmed = ref(false);
+const clearNote = ref("");
+let clearTimer = 0;
+
+const historySizes = [200, 500, 1000] as const;
 
 const languages: { id: AppLocale; label: string }[] = [
   { id: "zh-CN", label: "简体中文" },
@@ -23,6 +30,44 @@ const themes = computed(() => [
 
 const summonParts = computed(() => store.settings.summonShortcut.split("+"));
 const captureParts = computed(() => store.settings.captureShortcut.split("+"));
+
+function addIgnore() {
+  const name = ignoreDraft.value.trim();
+  if (!name) return;
+  ignoreDraft.value = "";
+  void store.update({ ignoredApps: [...store.settings.ignoredApps, name] });
+}
+
+function removeIgnore(name: string) {
+  void store.update({
+    ignoredApps: store.settings.ignoredApps.filter((item) => item !== name),
+  });
+}
+
+function setHistoryLimit(limit: 200 | 500 | 1000) {
+  if (store.settings.historyLimit === limit) return;
+  void store.update({ historyLimit: limit });
+}
+
+async function clearKept() {
+  clearNote.value = "";
+  if (!clearArmed.value) {
+    clearArmed.value = true;
+    window.clearTimeout(clearTimer);
+    clearTimer = window.setTimeout(() => {
+      clearArmed.value = false;
+    }, 3000);
+    return;
+  }
+  window.clearTimeout(clearTimer);
+  clearArmed.value = false;
+  try {
+    await clearClips();
+    clearNote.value = t("clearedKept");
+  } catch (err) {
+    clearNote.value = err instanceof Error ? err.message : String(err);
+  }
+}
 
 function parts(field: ShortcutField) {
   return field === "summon" ? summonParts.value : captureParts.value;
@@ -95,7 +140,7 @@ async function onCaptureKey(event: KeyboardEvent) {
   }
 }
 
-function toggle(field: "launchAtLogin" | "pauseRecording" | "reduceTransparency" | "ocrAuto" | "autoHide") {
+function toggle(field: "launchAtLogin" | "pauseRecording" | "reduceTransparency" | "ocrAuto" | "autoHide" | "showSource") {
   void store.update({ [field]: !store.settings[field] });
 }
 
@@ -110,6 +155,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener("keydown", onCaptureKey, true);
+  window.clearTimeout(clearTimer);
   if (store.capturing) void store.cancelCapture();
 });
 </script>
@@ -217,6 +263,38 @@ onUnmounted(() => {
 
         <div class="row">
           <div>
+            <div class="label">{{ t("showSource") }}</div>
+            <p>{{ t("showSourceHint") }}</p>
+          </div>
+          <button
+            type="button"
+            class="switch"
+            role="switch"
+            :aria-checked="store.settings.showSource"
+            :aria-label="t('showSource')"
+            @click="toggle('showSource')"
+          >
+            <span></span>
+          </button>
+        </div>
+
+        <div class="ignore">
+          <div class="label">{{ t("ignoredApps") }}</div>
+          <p>{{ t("ignoredAppsHint") }}</p>
+          <div v-if="store.settings.ignoredApps.length" class="chips">
+            <span v-for="name in store.settings.ignoredApps" :key="name" class="chip">
+              {{ name }}
+              <button type="button" :aria-label="t('removeApp', { name })" @click="removeIgnore(name)">×</button>
+            </span>
+          </div>
+          <form class="add" @submit.prevent="addIgnore">
+            <input v-model="ignoreDraft" :placeholder="t('ignoredPlaceholder')" :aria-label="t('ignoredApps')" />
+            <button type="submit" class="text">{{ t("addApp") }}</button>
+          </form>
+        </div>
+
+        <div class="row">
+          <div>
             <div class="label">{{ t("autoHide") }}</div>
             <p>{{ t("autoHideHint") }}</p>
           </div>
@@ -238,6 +316,36 @@ onUnmounted(() => {
             <p>{{ t("guideHint") }}</p>
           </div>
           <button type="button" class="text" @click="store.replayGuide()">{{ t("guideAgain") }}</button>
+        </div>
+
+        <div class="row">
+          <div>
+            <div class="label">{{ t("historyLimit") }}</div>
+            <p>{{ t("historyLimitHint") }}</p>
+          </div>
+          <div class="seg" role="radiogroup" :aria-label="t('historyLimit')">
+            <button
+              v-for="size in historySizes"
+              :key="size"
+              type="button"
+              role="radio"
+              :aria-checked="store.settings.historyLimit === size"
+              :class="{ on: store.settings.historyLimit === size }"
+              @click="setHistoryLimit(size)"
+            >
+              {{ size }}
+            </button>
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
+            <div class="label">{{ t("clearKept") }}</div>
+            <p>{{ clearNote || t("clearKeptHint") }}</p>
+          </div>
+          <button type="button" class="text danger" @click="clearKept()">
+            {{ clearArmed ? t("confirmClear") : t("clearAll") }}
+          </button>
         </div>
       </section>
 
@@ -404,6 +512,59 @@ h2 {
 .row:first-of-type {
   border-top: 0;
 }
+.ignore {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 10px 0 12px;
+  border-top: 1px solid var(--sep);
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 4px 0 8px;
+  border-radius: 8px;
+  background: var(--fill);
+  color: var(--text);
+  font-size: 12px;
+}
+.chip button {
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-2);
+  line-height: 18px;
+}
+.chip button:hover {
+  background: var(--fill-2);
+  color: var(--danger);
+}
+.add {
+  display: flex;
+  gap: 8px;
+}
+.add input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--sep);
+  border-radius: var(--r-ctl);
+  background: var(--fill);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
 .label {
   font-size: 14px;
   font-weight: 600;
@@ -443,6 +604,9 @@ kbd {
   border-radius: var(--r-ctl);
   background: var(--fill);
   color: var(--text);
+}
+.text.danger {
+  color: var(--danger);
 }
 .seg {
   display: inline-flex;

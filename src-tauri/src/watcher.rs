@@ -144,8 +144,10 @@ fn on_clipboard(app: &AppHandle) {
         return;
     }
     match clipboard::read() {
-        ClipboardRead::Text(text) => record_text(app, text),
-        ClipboardRead::Image(image) => record_image(app, &image.png, &image.hash),
+        ClipboardRead::Text(text) => record_text(app, text, clipboard::source_exe()),
+        ClipboardRead::Image(image) => {
+            record_image(app, &image.png, &image.hash, clipboard::source_exe())
+        }
         ClipboardRead::Ignored => {
             eprintln!("已跳过一条剪切板内容（敏感标记或超出长度上限），未记录正文");
         }
@@ -153,8 +155,11 @@ fn on_clipboard(app: &AppHandle) {
     }
 }
 
-pub(crate) fn record_image(app: &AppHandle, png: &[u8], hash: &str) {
+pub(crate) fn record_image(app: &AppHandle, png: &[u8], hash: &str, source: Option<String>) {
     if clipboard::is_self_image(hash) {
+        return;
+    }
+    if source.as_deref().is_some_and(|name| source_ignored(app, name)) {
         return;
     }
     let Some(state) = app.try_state::<Mutex<AppState>>() else {
@@ -171,12 +176,15 @@ pub(crate) fn record_image(app: &AppHandle, png: &[u8], hash: &str) {
             clip.kind == "image" && clip.hash.as_deref() == Some(hash)
         }) {
             existing.created_at = now;
+            if source.is_some() {
+                existing.source_app = source.clone();
+            }
             let updated = existing.clone();
             let id = updated.id;
             guard.clips.retain(|clip| clip.id != id);
             guard.clips.insert(0, updated.clone());
             drop(guard);
-            crate::storage::touch_clip(id, now);
+            crate::storage::touch_clip(id, now, updated.source_app.as_deref());
             eprintln!("剪切板图片已存在，挪到最前");
             notify(ClipStep {
                 clip: updated,
@@ -216,6 +224,8 @@ pub(crate) fn record_image(app: &AppHandle, png: &[u8], hash: &str) {
             ocr_status: if ocr_auto { "pending" } else { "none" }.into(),
             ocr_text: None,
             ocr_lang: None,
+            pinned: false,
+            source_app: source,
         },
     );
     let (removed_ids, evicted_hashes) = trim_history(&mut guard);
@@ -233,8 +243,11 @@ pub(crate) fn record_image(app: &AppHandle, png: &[u8], hash: &str) {
     }
 }
 
-fn record_text(app: &AppHandle, text: String) {
+fn record_text(app: &AppHandle, text: String, source: Option<String>) {
     if clipboard::is_self_write(&text) {
+        return;
+    }
+    if source.as_deref().is_some_and(|name| source_ignored(app, name)) {
         return;
     }
     let Some(state) = app.try_state::<Mutex<AppState>>() else {
@@ -247,7 +260,7 @@ fn record_text(app: &AppHandle, text: String) {
     let Ok(mut guard) = state.lock() else {
         return;
     };
-    let (step, evicted_hashes) = insert_text(&mut guard, text, now, digest, detected);
+    let (step, evicted_hashes) = insert_text(&mut guard, text, now, digest, detected, source);
     let chars = step.clip.content.chars().count();
     let kind = step.clip.kind.clone();
     drop(guard);
@@ -263,12 +276,16 @@ fn insert_text(
     now: i64,
     digest: String,
     detected: Detection,
+    source: Option<String>,
 ) -> (ClipStep, Vec<String>) {
     if let Some(index) = guard.clips.iter().position(|clip| {
         clip.kind != "image" && clip.hash.as_deref() == Some(digest.as_str()) && clip.content == text
     }) {
         let mut existing = guard.clips.remove(index);
         existing.created_at = now;
+        if source.is_some() {
+            existing.source_app = source;
+        }
         let clip = existing.clone();
         guard.clips.insert(0, existing);
         return (
@@ -287,10 +304,27 @@ fn insert_text(
         detected.language.map(str::to_string),
     );
     clip.hash = Some(digest);
+    clip.source_app = source;
     guard.next_id += 1;
     guard.clips.insert(0, clip.clone());
     let (removed_ids, evicted_hashes) = trim_history(guard);
     (ClipStep { clip, removed_ids }, evicted_hashes)
+}
+
+fn source_ignored(app: &AppHandle, exe: &str) -> bool {
+    let ignored = app
+        .try_state::<Mutex<AppState>>()
+        .and_then(|state| {
+            state
+                .lock()
+                .ok()
+                .map(|guard| crate::settings::is_ignored_app(&guard.settings.ignored_apps, exe))
+        })
+        .unwrap_or(false);
+    if ignored {
+        eprintln!("已跳过忽略名单中的程序: {exe}");
+    }
+    ignored
 }
 
 fn recording_paused(app: &AppHandle) -> bool {
@@ -300,10 +334,21 @@ fn recording_paused(app: &AppHandle) -> bool {
 }
 
 fn trim_history(guard: &mut AppState) -> (Vec<i64>, Vec<String>) {
-    if guard.clips.len() <= HISTORY_LIMIT {
+    let limit = guard.settings.history_limit as usize;
+    let mut need = guard.clips.len().saturating_sub(limit);
+    if need == 0 {
         return (Vec::new(), Vec::new());
     }
-    let removed = guard.clips.split_off(HISTORY_LIMIT);
+    let mut removed = Vec::new();
+    let mut index = guard.clips.len();
+    while index > 0 && need > 0 {
+        index -= 1;
+        if guard.clips[index].pinned {
+            continue;
+        }
+        removed.push(guard.clips.remove(index));
+        need -= 1;
+    }
     let mut removed_ids = Vec::with_capacity(removed.len());
     let mut evicted_hashes = Vec::new();
     for clip in removed {
@@ -323,6 +368,24 @@ fn trim_history(guard: &mut AppState) -> (Vec<i64>, Vec<String>) {
     (removed_ids, evicted_hashes)
 }
 
+/// 把上限调小之后，丢掉多出来的未收藏记录。
+pub(crate) fn apply_history_limit(app: &AppHandle) {
+    let Some(state) = app.try_state::<Mutex<AppState>>() else {
+        return;
+    };
+    let Ok(mut guard) = state.lock() else {
+        return;
+    };
+    let (removed_ids, hashes) = trim_history(&mut guard);
+    drop(guard);
+    if removed_ids.is_empty() {
+        return;
+    }
+    crate::storage::delete_saved(&removed_ids);
+    crate::images::remove_hashes(app, &hashes);
+    crate::panel::notify_pruned(app, removed_ids);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{insert_text, trim_history, HISTORY_LIMIT};
@@ -337,6 +400,7 @@ mod tests {
             now,
             hash(text.as_bytes()),
             classify(text),
+            None,
         );
         step.clip.id
     }
@@ -366,7 +430,7 @@ mod tests {
         }
         let removed = {
             let digest = hash(b"newer");
-            let (step, _) = insert_text(&mut guard, "newer".into(), 999, digest, classify("newer"));
+            let (step, _) = insert_text(&mut guard, "newer".into(), 999, digest, classify("newer"), None);
             step.removed_ids
         };
         assert_eq!(removed, vec![oldest]);
@@ -393,6 +457,8 @@ mod tests {
             ocr_status: "none".into(),
             ocr_text: None,
             ocr_lang: None,
+            pinned: false,
+            source_app: None,
         });
         guard.next_id = 2;
         for index in 1..HISTORY_LIMIT {
@@ -400,8 +466,28 @@ mod tests {
         }
         let digest = hash(b"overflow");
         let (step, evicted_hashes) =
-            insert_text(&mut guard, "overflow".into(), 999, digest, classify("overflow"));
+            insert_text(&mut guard, "overflow".into(), 999, digest, classify("overflow"), None);
         assert_eq!(step.removed_ids, vec![1]);
         assert_eq!(evicted_hashes, vec!["old-img-hash".to_string()]);
+    }
+
+    #[test]
+    fn smaller_limit_drops_the_oldest_unpinned_item() {
+        let mut guard = AppState::default();
+        guard.settings.history_limit = 2;
+        let oldest = store(&mut guard, "oldest", 1);
+        let kept = store(&mut guard, "kept", 2);
+        guard
+            .clips
+            .iter_mut()
+            .find(|clip| clip.id == kept)
+            .unwrap()
+            .pinned = true;
+        let newest = store(&mut guard, "newest", 3);
+        let ids: Vec<i64> = guard.clips.iter().map(|clip| clip.id).collect();
+        assert!(!ids.contains(&oldest));
+        assert!(ids.contains(&kept));
+        assert!(ids.contains(&newest));
+        assert!(guard.clips.iter().any(|clip| clip.id == kept && clip.pinned));
     }
 }

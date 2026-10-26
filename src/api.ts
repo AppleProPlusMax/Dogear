@@ -14,6 +14,8 @@ export interface Clip {
   ocrStatus: OcrStatus;
   ocrText: string | null;
   ocrLang: string | null;
+  pinned: boolean;
+  sourceApp: string | null;
 }
 
 export interface ClipStep {
@@ -64,6 +66,18 @@ export interface FoundColor {
 
 export function clipColors(id: number): Promise<FoundColor[]> {
   return invoke("clip_colors", { id });
+}
+
+export function clearClips(): Promise<void> {
+  return invoke("clear_clips");
+}
+
+export function deleteClip(id: number): Promise<void> {
+  return invoke("delete_clip", { id });
+}
+
+export function toggleClipPin(id: number): Promise<boolean> {
+  return invoke("toggle_clip_pin", { id });
 }
 
 export function copyPlain(text: string): Promise<void> {
@@ -121,6 +135,9 @@ export interface Settings {
   pinned: boolean;
   guideSeen: boolean;
   language: AppLocale;
+  ignoredApps: string[];
+  historyLimit: 200 | 500 | 1000;
+  showSource: boolean;
 }
 
 export type SettingsPatch = Partial<Settings>;

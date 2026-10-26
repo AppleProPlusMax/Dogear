@@ -161,7 +161,7 @@ fn grab_and_store(app: &AppHandle, shot: &Shot) -> Result<(), String> {
     let png = images::encode(shot.width as u32, shot.height as u32, &bgra)?;
     let hash = images::hash(&png);
     // 先入库再写入剪切板。写入时打上自己的标记，监听器就不会把同一张图再记一遍。
-    watcher::record_image(app, &png, &hash);
+    watcher::record_image(app, &png, &hash, None);
     if let Err(err) = clipboard::write_image(&png, &hash) {
         eprintln!("截图已保存，但没能放进剪切板: {err}");
     }

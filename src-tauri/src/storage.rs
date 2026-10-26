@@ -67,19 +67,45 @@ pub fn save_step(clip: &Clip, removed_ids: &[i64]) {
 }
 
 /// 同一张图片再次复制时更新时间并排到最前。
-pub fn touch_clip(id: i64, created_at: i64) {
+pub fn touch_clip(id: i64, created_at: i64, source_app: Option<&str>) {
     let Some(lock) = DB.get() else {
         return;
     };
     let Ok(conn) = lock.lock() else {
         return;
     };
-    if let Err(err) = touch_clip_in(&conn, id, created_at) {
+    if let Err(err) = touch_clip_in(&conn, id, created_at, source_app) {
         eprintln!("更新历史记录时间失败: {err}");
     }
 }
 
-/// 同步图片的 OCR 识别状态与结果。
+pub fn set_pinned(id: i64, pinned: bool) {
+    let Some(lock) = DB.get() else {
+        return;
+    };
+    let Ok(conn) = lock.lock() else {
+        return;
+    };
+    if let Err(err) = conn.execute(
+        "UPDATE clips SET pinned = ?1 WHERE id = ?2",
+        params![if pinned { 1 } else { 0 }, id],
+    ) {
+        eprintln!("更新收藏状态失败: {err}");
+    }
+}
+
+pub fn delete_saved(ids: &[i64]) {
+    let Some(lock) = DB.get() else {
+        return;
+    };
+    let Ok(conn) = lock.lock() else {
+        return;
+    };
+    if let Err(err) = delete_ids(&conn, ids) {
+        eprintln!("删除历史记录失败: {err}");
+    }
+}
+
 pub fn update_ocr(id: i64, status: &str, text: Option<&str>, lang: Option<&str>) {
     let Some(lock) = DB.get() else {
         return;
@@ -129,12 +155,52 @@ fn create_schema(conn: &Connection) -> Result<(), String> {
             height INTEGER,
             ocr_status TEXT NOT NULL DEFAULT 'none',
             ocr_text TEXT,
-            ocr_lang TEXT
+            ocr_lang TEXT,
+            pinned INTEGER NOT NULL DEFAULT 0,
+            source_app TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_clips_created_at
             ON clips(created_at DESC, id DESC);",
     )
-    .map_err(|err| err.to_string())
+    .map_err(|err| err.to_string())?;
+    ensure_pinned_column(conn)?;
+    ensure_source_column(conn)
+}
+
+fn ensure_pinned_column(conn: &Connection) -> Result<(), String> {
+    if column_exists(conn, "pinned")? {
+        return Ok(());
+    }
+    conn.execute(
+        "ALTER TABLE clips ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+        [],
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn ensure_source_column(conn: &Connection) -> Result<(), String> {
+    if column_exists(conn, "source_app")? {
+        return Ok(());
+    }
+    conn.execute("ALTER TABLE clips ADD COLUMN source_app TEXT", [])
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn column_exists(conn: &Connection, column: &str) -> Result<bool, String> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(clips)")
+        .map_err(|err| err.to_string())?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|err| err.to_string())?;
+    for name in names {
+        if name.map_err(|err| err.to_string())? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn load_and_prune(
@@ -147,8 +213,9 @@ fn load_and_prune(
         .map_err(|err| err.to_string())?;
 
     let all = query_all(conn)?;
-    let mut clips = Vec::with_capacity(all.len().min(limit));
+    let mut clips = Vec::new();
     let mut stale_ids = Vec::new();
+    let mut present = Vec::new();
 
     for clip in all {
         if check_image_files && clip.kind == "image" {
@@ -161,7 +228,23 @@ fn load_and_prune(
                 continue;
             }
         }
-        if clips.len() < limit {
+        present.push(clip);
+    }
+
+    let pinned_count = present.iter().filter(|clip| clip.pinned).count();
+    let unpinned_limit = limit.saturating_sub(pinned_count);
+    let mut unpinned_kept = 0usize;
+
+    for clip in present {
+        let keep = if clip.pinned {
+            true
+        } else if unpinned_kept < unpinned_limit {
+            unpinned_kept += 1;
+            true
+        } else {
+            false
+        };
+        if keep {
             clips.push(clip);
         } else {
             stale_ids.push(clip.id);
@@ -191,7 +274,7 @@ fn query_all(conn: &Connection) -> Result<Vec<Clip>, String> {
             "SELECT
                 id, content, created_at, kind, language,
                 file_path, thumb_path, hash, width, height,
-                ocr_status, ocr_text, ocr_lang
+                ocr_status, ocr_text, ocr_lang, pinned, source_app
              FROM clips
              ORDER BY created_at DESC, id DESC",
         )
@@ -215,6 +298,8 @@ fn query_all(conn: &Connection) -> Result<Vec<Clip>, String> {
                 ocr_status: row.get(10)?,
                 ocr_text: row.get(11)?,
                 ocr_lang: row.get(12)?,
+                pinned: row.get::<_, i64>(13)? != 0,
+                source_app: row.get(14)?,
             })
         })
         .map_err(|err| err.to_string())?;
@@ -232,8 +317,8 @@ fn save_step_in(conn: &mut Connection, clip: &Clip, removed_ids: &[i64]) -> Resu
         "INSERT INTO clips (
             id, content, created_at, kind, language,
             file_path, thumb_path, hash, width, height,
-            ocr_status, ocr_text, ocr_lang
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            ocr_status, ocr_text, ocr_lang, pinned, source_app
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
         ON CONFLICT(id) DO UPDATE SET
             content = excluded.content,
             created_at = excluded.created_at,
@@ -246,7 +331,9 @@ fn save_step_in(conn: &mut Connection, clip: &Clip, removed_ids: &[i64]) -> Resu
             height = excluded.height,
             ocr_status = excluded.ocr_status,
             ocr_text = excluded.ocr_text,
-            ocr_lang = excluded.ocr_lang",
+            ocr_lang = excluded.ocr_lang,
+            pinned = excluded.pinned,
+            source_app = excluded.source_app",
         params![
             clip.id,
             clip.content,
@@ -261,6 +348,8 @@ fn save_step_in(conn: &mut Connection, clip: &Clip, removed_ids: &[i64]) -> Resu
             clip.ocr_status,
             clip.ocr_text,
             clip.ocr_lang,
+            if clip.pinned { 1 } else { 0 },
+            clip.source_app,
         ],
     )
     .map_err(|err| err.to_string())?;
@@ -269,10 +358,10 @@ fn save_step_in(conn: &mut Connection, clip: &Clip, removed_ids: &[i64]) -> Resu
     tx.commit().map_err(|err| err.to_string())
 }
 
-fn touch_clip_in(conn: &Connection, id: i64, created_at: i64) -> Result<(), String> {
+fn touch_clip_in(conn: &Connection, id: i64, created_at: i64, source_app: Option<&str>) -> Result<(), String> {
     conn.execute(
-        "UPDATE clips SET created_at = ?1 WHERE id = ?2",
-        params![created_at, id],
+        "UPDATE clips SET created_at = ?1, source_app = COALESCE(?2, source_app) WHERE id = ?3",
+        params![created_at, source_app, id],
     )
     .map_err(|err| err.to_string())?;
     Ok(())
@@ -337,7 +426,7 @@ mod tests {
         assert_eq!(loaded.clips[1].id, 1);
 
         // 第一条再次被复制，更新时间后应排到最前。
-        touch_clip_in(&conn, 1, 300).unwrap();
+        touch_clip_in(&conn, 1, 300, None).unwrap();
         let loaded = load_and_prune(&mut conn, 200, false).unwrap();
         assert_eq!(loaded.clips[0].id, 1);
         assert_eq!(loaded.clips[0].created_at, 300);
@@ -360,6 +449,8 @@ mod tests {
             ocr_status: "pending".into(),
             ocr_text: None,
             ocr_lang: None,
+            pinned: false,
+            source_app: None,
         };
         save_step_in(&mut conn, &img, &[]).unwrap();
         update_ocr_in(&conn, 5, "done", Some("识别结果"), Some("zh-Hans-CN")).unwrap();
@@ -395,6 +486,8 @@ mod tests {
             ocr_status: "done".into(),
             ocr_text: Some("old".into()),
             ocr_lang: None,
+            pinned: false,
+            source_app: None,
         };
         let valid_text = Clip::text(2, "keep me".into(), 200, "text".into(), None);
         save_step_in(&mut conn, &missing_img, &[]).unwrap();

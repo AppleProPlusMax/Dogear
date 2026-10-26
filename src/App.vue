@@ -15,6 +15,8 @@ import {
   copyClip,
   copyPlain,
   openLink,
+  deleteClip,
+  toggleClipPin,
   previewCode,
   type FoundColor,
   getEffectState,
@@ -123,9 +125,13 @@ function itemTitle(clip: Clip) {
 }
 
 function itemSub(clip: Clip) {
-  if (clip.kind !== "image") return t("itemMeta", { kind: kindLabel(clip), n: clip.content.length });
-  const status = ocrLabel(clip);
-  return status ? t("imageMeta", { status }) : t("kindImage");
+  const body =
+    clip.kind !== "image"
+      ? t("itemMeta", { kind: kindLabel(clip), n: clip.content.length })
+      : ocrLabel(clip)
+        ? t("imageMeta", { status: ocrLabel(clip) })
+        : t("kindImage");
+  return settingsStore.settings.showSource && clip.sourceApp ? `${clip.sourceApp} · ${body}` : body;
 }
 
 const searched = computed(() => {
@@ -134,7 +140,8 @@ const searched = computed(() => {
   return clips.value.filter(
     (clip) =>
       clip.content.toLowerCase().includes(q)
-      || (clip.ocrText ?? "").toLowerCase().includes(q),
+      || (clip.ocrText ?? "").toLowerCase().includes(q)
+      || (settingsStore.settings.showSource && (clip.sourceApp ?? "").toLowerCase().includes(q)),
   );
 });
 
@@ -300,6 +307,38 @@ async function copySelected(asText = false) {
   }
 }
 
+async function toggleFavorite() {
+  const clip = current.value;
+  if (!clip) return;
+  const previous = clip.pinned;
+  clip.pinned = !previous;
+  try {
+    clip.pinned = await toggleClipPin(clip.id);
+  } catch (err) {
+    clip.pinned = previous;
+    notice.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+async function deleteSelected() {
+  const clip = current.value;
+  if (!clip) return;
+  const id = clip.id;
+  notice.value = "";
+  try {
+    await deleteClip(id);
+    const index = clips.value.findIndex((item) => item.id === id);
+    if (index >= 0) clips.value.splice(index, 1);
+    titleCache.delete(id);
+    if (selected.value >= filtered.value.length) {
+      selected.value = Math.max(0, filtered.value.length - 1);
+    }
+    notice.value = t("removedItem");
+  } catch (err) {
+    notice.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
 async function recognizeSelected() {
   const clip = current.value;
   if (!clip || clip.kind !== "image") return;
@@ -334,7 +373,18 @@ function onKeydown(event: KeyboardEvent) {
   } else if (event.key === "o" && event.ctrlKey) {
     event.preventDefault();
     void recognizeSelected();
+  } else if (event.key.toLowerCase() === "p" && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
+    event.preventDefault();
+    void toggleFavorite();
+  } else if (event.key === "Delete" && !event.repeat && !editingText(event)) {
+    event.preventDefault();
+    void deleteSelected();
   }
+}
+
+function editingText(event: KeyboardEvent) {
+  const target = event.target;
+  return target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
 }
 
 function captureScreen() {
@@ -496,6 +546,19 @@ onMounted(async () => {
   if (!("__TAURI_INTERNALS__" in window)) return;
   window.addEventListener("mousedown", onDragPointerDown, true);
   unlisten = [
+    await listen<{ removedIds: number[] }>("history-pruned", (event) => {
+      const gone = new Set(event.payload.removedIds);
+      if (!gone.size) return;
+      clips.value = clips.value.filter((clip) => !gone.has(clip.id));
+      for (const id of gone) {
+        titleCache.delete(id);
+        delete thumbs.value[id];
+        delete fullImages.value[id];
+      }
+      if (selected.value >= filtered.value.length) {
+        selected.value = Math.max(0, filtered.value.length - 1);
+      }
+    }),
     await listen<ClipsChanged>("clips-changed", (event) => {
       onClipsChanged(event.payload);
     }),
@@ -631,7 +694,7 @@ onUnmounted(() => {
             :key="item.clip.id"
             type="button"
             class="item"
-            :class="{ on: item.index === selected }"
+            :class="{ on: item.index === selected, kept: item.clip.pinned }"
             @click="selected = item.index"
             @dblclick="pasteSelected($event.shiftKey)"
           >
@@ -664,6 +727,11 @@ onUnmounted(() => {
               </span>
             </span>
             <span class="time">{{ relativeTime(item.clip.createdAt) }}</span>
+            <svg v-if="item.clip.pinned" class="dogear" viewBox="0 0 26 26" aria-hidden="true">
+              <path d="M26 0 L7 0 L26 19 Z" fill="color-mix(in srgb, var(--text) 18%, transparent)" />
+              <path d="M26 0 L11 0 L26 15 Z" fill="var(--warn)" />
+              <path d="M12.2 1.2 L24.8 13.8" stroke="rgba(255,255,255,0.8)" stroke-width="1.15" fill="none" />
+            </svg>
           </button>
         </template>
       </section>
@@ -674,8 +742,41 @@ onUnmounted(() => {
 
       <section v-if="current" class="preview">
         <div class="ph">
-          <div class="name">{{ kindLabel(current) }}</div>
-          <div class="when">{{ relativeTime(current.createdAt) }}</div>
+          <div>
+            <div class="name">{{ kindLabel(current) }}</div>
+            <div v-if="settingsStore.settings.showSource && current.sourceApp" class="source">{{ current.sourceApp }}</div>
+          </div>
+          <div class="ph-actions">
+            <button
+              type="button"
+              class="icon"
+              :class="{ on: current.pinned }"
+              :aria-pressed="current.pinned"
+              :aria-label="current.pinned ? t('unfavorite') : t('favorite')"
+              :title="current.pinned ? t('unfavorite') : t('favorite')"
+              @click="toggleFavorite()"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3.2l2.4 4.9 5.4.8-3.9 3.8.9 5.4L12 15.8 7.2 18.1l.9-5.4L4.2 8.9l5.4-.8L12 3.2z" />
+              </svg>
+              {{ t("favorite") }}
+            </button>
+            <button
+              type="button"
+              class="icon danger"
+              :aria-label="t('removeItem')"
+              :title="t('removeItem')"
+              @click="deleteSelected()"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 7h16" />
+                <path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                <path d="M8 7l1 13h6l1-13" />
+              </svg>
+              {{ t("removeItem") }}
+            </button>
+            <div class="when">{{ relativeTime(current.createdAt) }}</div>
+          </div>
         </div>
 
         <template v-if="current.kind === 'image'">
@@ -768,14 +869,26 @@ onUnmounted(() => {
       </section>
       <section v-else class="preview quiet">
         <p>{{ t("previewEmpty") }}</p>
+        <p v-if="notice" class="notice">{{ notice }}</p>
       </section>
     </div>
 
     <footer>
       <div class="keys">
-        <span><kbd>↑</kbd><kbd>↓</kbd> {{ t("select") }}</span>
-        <span><kbd>Enter</kbd> {{ t("paste") }}</span>
-        <span><kbd>Shift</kbd><kbd>Enter</kbd> {{ t("pasteText") }}</span>
+        <span>
+          <i class="keycap"><svg class="keyico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5" /><path d="M6 11l6-6 6 6" /></svg></i>
+          <i class="keycap"><svg class="keyico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14" /><path d="M6 13l6 6 6-6" /></svg></i>
+          {{ t("select") }}
+        </span>
+        <span>
+          <i class="keycap"><svg class="keyico" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 10l-4 4 4 4" /><path d="M5 14h9a4 4 0 0 0 4-4V6" /></svg></i>
+          {{ t("paste") }}
+        </span>
+        <span>
+          <i class="keycap"><svg class="keyico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5l5 6h-3.2v7h-3.6v-7H7L12 5z" /><path d="M8 20h8" /></svg></i>
+          <i class="keycap"><svg class="keyico" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 10l-4 4 4 4" /><path d="M5 14h9a4 4 0 0 0 4-4V6" /></svg></i>
+          {{ t("pasteText") }}
+        </span>
         <span><kbd>Esc</kbd> {{ t("close") }}</span>
       </div>
       <div class="count">{{ t("itemCount", { shortcut: settingsStore.settings.summonShortcut, n: clips.length }) }}</div>
@@ -1001,6 +1114,8 @@ onUnmounted(() => {
   padding: 10px 10px 4px;
 }
 .item {
+  position: relative;
+  overflow: hidden;
   width: 100%;
   display: flex;
   align-items: center;
@@ -1017,6 +1132,17 @@ onUnmounted(() => {
 .item.on {
   background: var(--accent-soft);
   box-shadow: inset 0 0 0 1px var(--accent-ring);
+}
+.item.kept {
+  padding-right: 18px;
+}
+.dogear {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 26px;
+  height: 26px;
+  pointer-events: none;
 }
 .tile {
   width: 38px;
@@ -1111,18 +1237,72 @@ onUnmounted(() => {
 }
 .ph {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+.ph-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+.ph-actions .when {
+  margin-left: 8px;
+}
+.icon {
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 550;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.icon:hover {
+  background: var(--fill);
+  color: var(--text);
+}
+.icon.on {
+  color: var(--warn);
+}
+.icon.on svg {
+  fill: currentColor;
+}
+.icon.danger:hover {
+  color: var(--danger);
+}
+.icon svg {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .name {
   font-size: 15px;
   font-weight: 600;
 }
+.source {
+  margin-top: 2px;
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 550;
+}
 .actions {
   display: flex;
   justify-content: flex-end;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
 }
 .actions.with-switch {
@@ -1366,24 +1546,48 @@ onUnmounted(() => {
   font-size: 12px;
 }
 footer {
-  height: 48px;
+  min-height: 48px;
   border-top: 1px solid var(--sep);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 18px;
-  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 18px;
+  gap: 8px 12px;
 }
 .keys {
   display: flex;
-  gap: 14px;
+  flex-wrap: wrap;
+  gap: 8px 14px;
   color: var(--text-2);
   font-size: 12px;
+  min-width: 0;
 }
 .keys span {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+.keycap {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  background: var(--kbd-bg);
+  border: 1px solid var(--kbd-border);
+  color: var(--text-2);
+  flex: none;
+}
+.keyico {
+  width: 13px;
+  height: 13px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 kbd {
   font-family: var(--font-ui);

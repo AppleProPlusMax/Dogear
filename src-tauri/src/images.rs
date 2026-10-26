@@ -371,6 +371,8 @@ mod tests {
             ocr_status: "none".into(),
             ocr_text: None,
             ocr_lang: None,
+            pinned: false,
+            source_app: None,
         };
 
         let removed = cleanup_orphans_in(&dir, &[kept_clip]);

@@ -2,15 +2,22 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use windows::core::w;
-use windows::Win32::Foundation::{HANDLE, HGLOBAL};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HGLOBAL};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, DeleteDC, GetDIBits, GetObjectW, BITMAP, BITMAPINFO, BITMAPINFOHEADER,
     BI_RGB, DIB_RGB_COLORS, HBITMAP, HGDIOBJ,
 };
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
-    RegisterClipboardFormatW, SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardOwner, IsClipboardFormatAvailable,
+    OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
+use windows::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
 const CF_UNICODETEXT: u32 = 13;
 const CF_BITMAP: u32 = 2;
@@ -86,6 +93,87 @@ pub fn is_self_image(hash: &str) -> bool {
         *guard = None;
     }
     matched
+}
+
+/// 复制来源的进程名，例如 `Code.exe`。剪切板所有者优先，没有再看前台窗口。
+/// WebView2 的所有者是 `msedgewebview2.exe`，再往上找到宿主程序。
+pub fn source_exe() -> Option<String> {
+    unsafe {
+        let owner = GetClipboardOwner().unwrap_or_default();
+        let hwnd = if owner.0.is_null() {
+            GetForegroundWindow()
+        } else {
+            owner
+        };
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let mut name = process_exe(pid)?;
+        let mut current = pid;
+        for _ in 0..4 {
+            if !name.eq_ignore_ascii_case("msedgewebview2.exe") {
+                break;
+            }
+            let Some(parent) = parent_pid(current) else {
+                break;
+            };
+            let Some(parent_name) = process_exe(parent) else {
+                break;
+            };
+            current = parent;
+            name = parent_name;
+        }
+        if name.eq_ignore_ascii_case("dogear.exe") {
+            return None;
+        }
+        Some(name)
+    }
+}
+
+unsafe fn process_exe(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+    let mut buffer = vec![0u16; 1024];
+    let mut len = buffer.len() as u32;
+    let queried = QueryFullProcessImageNameW(
+        handle,
+        PROCESS_NAME_WIN32,
+        windows::core::PWSTR(buffer.as_mut_ptr()),
+        &mut len,
+    );
+    let _ = CloseHandle(handle);
+    queried.ok()?;
+    let path = String::from_utf16_lossy(&buffer[..len as usize]);
+    std::path::Path::new(&path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+}
+
+unsafe fn parent_pid(pid: u32) -> Option<u32> {
+    let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
+    let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    if Process32FirstW(snap, &mut entry).is_err() {
+        let _ = CloseHandle(snap);
+        return None;
+    }
+    loop {
+        if entry.th32ProcessID == pid {
+            let parent = entry.th32ParentProcessID;
+            let _ = CloseHandle(snap);
+            return Some(parent);
+        }
+        if Process32NextW(snap, &mut entry).is_err() {
+            break;
+        }
+    }
+    let _ = CloseHandle(snap);
+    None
 }
 
 pub fn read() -> ClipboardRead {

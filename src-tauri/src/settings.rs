@@ -33,6 +33,13 @@ pub struct Settings {
     pub guide_seen: bool,
     /// 界面语言。zh-CN 或 en。
     pub language: String,
+    /// 不记录这些程序的剪切板，按进程名比较，例如 `WeChat.exe`。
+    pub ignored_apps: Vec<String>,
+    /// 未收藏记录的保留条数。只能是 200、500 或 1000。
+    pub history_limit: u32,
+    /// 在列表和预览里显示复制来源。旧配置没有这一项时默认显示。
+    #[serde(default = "default_show_source")]
+    pub show_source: bool,
 }
 
 impl Default for Settings {
@@ -49,6 +56,9 @@ impl Default for Settings {
             pinned: false,
             guide_seen: false,
             language: "zh-CN".into(),
+            ignored_apps: Vec::new(),
+            history_limit: crate::watcher::HISTORY_LIMIT as u32,
+            show_source: true,
         }
     }
 }
@@ -67,6 +77,9 @@ pub struct SettingsPatch {
     pub pinned: Option<bool>,
     pub guide_seen: Option<bool>,
     pub language: Option<String>,
+    pub ignored_apps: Option<Vec<String>>,
+    pub history_limit: Option<u32>,
+    pub show_source: Option<bool>,
 }
 
 pub fn load() -> Settings {
@@ -135,6 +148,9 @@ pub fn update(app: &AppHandle, patch: SettingsPatch) -> Result<Settings, String>
     tray::set_paused(next.pause_recording);
     if next.language != current.language {
         tray::apply_language(&next.language);
+    }
+    if next.history_limit < current.history_limit {
+        crate::watcher::apply_history_limit(app);
     }
     if next.auto_hide != current.auto_hide || next.pinned != current.pinned {
         panel::apply_auto_hide(app, next.auto_hide);
@@ -250,6 +266,15 @@ fn merge(current: Settings, patch: SettingsPatch) -> Result<Settings, String> {
     if let Some(language) = patch.language {
         next.language = normalize_language(&language)?;
     }
+    if let Some(apps) = patch.ignored_apps {
+        next.ignored_apps = normalize_ignored(apps);
+    }
+    if let Some(limit) = patch.history_limit {
+        next.history_limit = require_history_limit(limit, &next.language)?;
+    }
+    if let Some(show) = patch.show_source {
+        next.show_source = show;
+    }
     let lang = next.language.clone();
     if let Some(shortcut) = patch.summon_shortcut {
         next.summon_shortcut = normalize_shortcut(&shortcut, &lang)?;
@@ -303,6 +328,10 @@ fn normalize_loaded(mut settings: Settings) -> Settings {
     if normalize_language(&settings.language).is_err() {
         settings.language = "zh-CN".into();
     }
+    settings.ignored_apps = normalize_ignored(std::mem::take(&mut settings.ignored_apps));
+    if !matches!(settings.history_limit, 200 | 500 | 1000) {
+        settings.history_limit = 200;
+    }
     if settings.auto_hide {
         settings.pinned = false;
     }
@@ -316,11 +345,56 @@ fn normalize_theme(theme: &str) -> Result<String, String> {
     }
 }
 
+fn default_show_source() -> bool {
+    true
+}
+
+fn require_history_limit(value: u32, lang: &str) -> Result<u32, String> {
+    match value {
+        200 | 500 | 1000 => Ok(value),
+        _ => Err(say(
+            lang,
+            "保留条数只能是 200、500 或 1000",
+            "History size must be 200, 500, or 1000",
+        )),
+    }
+}
+
 fn normalize_language(language: &str) -> Result<String, String> {
     match language {
         "zh-CN" | "en" => Ok(language.to_string()),
         _ => Err("语言只能是简体中文或英语".into()),
     }
+}
+
+pub(crate) fn is_ignored_app(list: &[String], exe: &str) -> bool {
+    let key = exe_key(exe);
+    !key.is_empty() && list.iter().any(|name| exe_key(name) == key)
+}
+
+fn normalize_ignored(names: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for name in names {
+        let name = name.trim();
+        if name.is_empty() || name.chars().any(|ch| ch.is_control() || matches!(ch, '\\' | '/' | ':' | '*')) {
+            continue;
+        }
+        let stored = if name.to_ascii_lowercase().ends_with(".exe") {
+            name.to_string()
+        } else {
+            format!("{name}.exe")
+        };
+        if out.iter().any(|item: &String| exe_key(item) == exe_key(&stored)) {
+            continue;
+        }
+        out.push(stored);
+    }
+    out
+}
+
+fn exe_key(name: &str) -> String {
+    let lower = name.trim().to_ascii_lowercase();
+    lower.strip_suffix(".exe").unwrap_or(&lower).to_string()
 }
 
 fn say(lang: &str, zh: &str, en: &str) -> String {
@@ -520,7 +594,7 @@ fn settings_path() -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{merge, normalize_loaded, normalize_shortcut, Settings, SettingsPatch};
+    use super::{is_ignored_app, merge, normalize_ignored, normalize_loaded, normalize_shortcut, Settings, SettingsPatch};
 
     #[test]
     fn normalizes_modifier_order_and_case() {
@@ -571,5 +645,39 @@ mod tests {
         assert!(!settings.pinned);
         assert!(!settings.guide_seen);
         assert_eq!(settings.theme, "dark");
+        assert!(settings.show_source);
+    }
+
+    #[test]
+    fn ignored_apps_match_exe_names() {
+        let list = normalize_ignored(vec!["WeChat".into(), "wechat.exe".into(), "Code.EXE".into()]);
+        assert_eq!(list, vec!["WeChat.exe".to_string(), "Code.EXE".to_string()]);
+        assert!(is_ignored_app(&list, "wechat.exe"));
+        assert!(is_ignored_app(&list, "CODE.exe"));
+        assert!(!is_ignored_app(&list, "notepad.exe"));
+    }
+
+    #[test]
+    fn history_limit_only_allows_three_sizes() {
+        let err = merge(
+            Settings::default(),
+            SettingsPatch {
+                history_limit: Some(300),
+                ..SettingsPatch::default()
+            },
+        );
+        assert!(err.is_err());
+        let next = merge(
+            Settings::default(),
+            SettingsPatch {
+                history_limit: Some(500),
+                ..SettingsPatch::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(next.history_limit, 500);
+        let mut loaded = Settings::default();
+        loaded.history_limit = 0;
+        assert_eq!(normalize_loaded(loaded).history_limit, 200);
     }
 }

@@ -76,6 +76,9 @@ pub fn run() {
             paste::preview_code,
             paste::clip_colors,
             paste::copy_plain,
+            panel::toggle_clip_pin,
+            panel::delete_clip,
+            panel::clear_clips,
             capture::start_capture,
             get_effect_state,
             get_settings,
@@ -89,7 +92,7 @@ pub fn run() {
                 .get_webview_window("main")
                 .ok_or("缺少主窗口 main")?;
             let loaded = settings::load();
-            let mut history = storage::init(app.handle(), watcher::HISTORY_LIMIT);
+            let mut history = storage::init(app.handle(), loaded.history_limit as usize);
             let mut pending_ocr = Vec::new();
             for clip in &mut history.clips {
                 if clip.kind == "image" && clip.ocr_status == "pending" {

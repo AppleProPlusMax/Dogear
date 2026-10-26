@@ -25,6 +25,10 @@ pub struct Clip {
     pub ocr_status: String,
     pub ocr_text: Option<String>,
     pub ocr_lang: Option<String>,
+    /// 收藏。收藏项不会被历史上限自动清掉。
+    pub pinned: bool,
+    /// 复制来源进程名，例如 `Code.exe`。
+    pub source_app: Option<String>,
 }
 
 impl Clip {
@@ -43,6 +47,8 @@ impl Clip {
             ocr_status: "none".into(),
             ocr_text: None,
             ocr_lang: None,
+            pinned: false,
+            source_app: None,
         }
     }
 }

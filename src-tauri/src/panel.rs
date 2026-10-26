@@ -358,6 +358,87 @@ pub fn retry_ocr(state: State<'_, Mutex<AppState>>, id: i64) -> Result<(), Strin
     Ok(())
 }
 
+#[tauri::command]
+pub fn toggle_clip_pin(state: State<'_, Mutex<AppState>>, id: i64) -> Result<bool, String> {
+    let mut guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+    let clip = guard
+        .clips
+        .iter_mut()
+        .find(|clip| clip.id == id)
+        .ok_or("记录不存在")?;
+    clip.pinned = !clip.pinned;
+    let pinned = clip.pinned;
+    drop(guard);
+    crate::storage::set_pinned(id, pinned);
+    Ok(pinned)
+}
+
+#[tauri::command]
+pub fn delete_clip(app: AppHandle, state: State<'_, Mutex<AppState>>, id: i64) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+    let index = guard
+        .clips
+        .iter()
+        .position(|clip| clip.id == id)
+        .ok_or("记录不存在")?;
+    let removed = guard.clips.remove(index);
+    let hashes = unused_image_hashes(&guard.clips, std::slice::from_ref(&removed));
+    drop(guard);
+    crate::storage::delete_saved(&[id]);
+    crate::images::remove_hashes(&app, &hashes);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn clear_clips(app: AppHandle, state: State<'_, Mutex<AppState>>) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+    let mut removed = Vec::new();
+    guard.clips.retain(|clip| {
+        if clip.pinned {
+            true
+        } else {
+            removed.push(clip.clone());
+            false
+        }
+    });
+    let removed_ids: Vec<i64> = removed.iter().map(|clip| clip.id).collect();
+    let hashes = unused_image_hashes(&guard.clips, &removed);
+    drop(guard);
+    crate::storage::delete_saved(&removed_ids);
+    crate::images::remove_hashes(&app, &hashes);
+    notify_pruned(&app, removed_ids);
+    Ok(())
+}
+
+pub(crate) fn notify_pruned(app: &AppHandle, removed_ids: Vec<i64>) {
+    if removed_ids.is_empty() {
+        return;
+    }
+    let _ = app.emit(
+        "history-pruned",
+        serde_json::json!({ "removedIds": removed_ids }),
+    );
+}
+
+fn unused_image_hashes(kept: &[crate::state::Clip], removed: &[crate::state::Clip]) -> Vec<String> {
+    let mut hashes = Vec::new();
+    for clip in removed {
+        if clip.kind != "image" {
+            continue;
+        }
+        let Some(hash) = clip.hash.clone() else {
+            continue;
+        };
+        let still_used = kept
+            .iter()
+            .any(|item| item.kind == "image" && item.hash.as_deref() == Some(hash.as_str()));
+        if !still_used && !hashes.iter().any(|item| item == &hash) {
+            hashes.push(hash);
+        }
+    }
+    hashes
+}
+
 fn clip_file(
     state: &State<'_, Mutex<AppState>>,
     id: i64,
