@@ -197,6 +197,49 @@ onUnmounted(() => {
         </div>
         <div class="row">
           <div>
+            <div class="label">{{ t("launch") }}</div>
+            <p>{{ t("launchHint") }}</p>
+          </div>
+          <button
+            type="button"
+            class="switch"
+            role="switch"
+            :aria-checked="store.settings.launchAtLogin"
+            :aria-label="t('launch')"
+            @click="toggle('launchAtLogin')"
+          >
+            <span></span>
+          </button>
+        </div>
+        <div class="row">
+          <div>
+            <div class="label">{{ t("autoHide") }}</div>
+            <p>{{ t("autoHideHint") }}</p>
+          </div>
+          <button
+            type="button"
+            class="switch"
+            role="switch"
+            :aria-checked="store.settings.autoHide"
+            :aria-label="t('autoHide')"
+            @click="toggle('autoHide')"
+          >
+            <span></span>
+          </button>
+        </div>
+        <div class="row">
+          <div>
+            <div class="label">{{ t("guide") }}</div>
+            <p>{{ t("guideHint") }}</p>
+          </div>
+          <button type="button" class="text" @click="store.replayGuide()">{{ t("guideAgain") }}</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>{{ t("shortcuts") }}</h2>
+        <div class="row">
+          <div>
             <div class="label">{{ t("summon") }}</div>
             <p>{{ t("summonHint") }}</p>
           </div>
@@ -226,24 +269,10 @@ onUnmounted(() => {
           </div>
         </div>
         <p v-if="store.capturing === 'capture'" class="capture-hint">{{ t("captureHintKeys") }}</p>
+      </section>
 
-        <div class="row">
-          <div>
-            <div class="label">{{ t("launch") }}</div>
-            <p>{{ t("launchHint") }}</p>
-          </div>
-          <button
-            type="button"
-            class="switch"
-            role="switch"
-            :aria-checked="store.settings.launchAtLogin"
-            :aria-label="t('launch')"
-            @click="toggle('launchAtLogin')"
-          >
-            <span></span>
-          </button>
-        </div>
-
+      <section>
+        <h2>{{ t("history") }}</h2>
         <div class="row">
           <div>
             <div class="label">{{ t("pause") }}</div>
@@ -291,31 +320,6 @@ onUnmounted(() => {
             <input v-model="ignoreDraft" :placeholder="t('ignoredPlaceholder')" :aria-label="t('ignoredApps')" />
             <button type="submit" class="text">{{ t("addApp") }}</button>
           </form>
-        </div>
-
-        <div class="row">
-          <div>
-            <div class="label">{{ t("autoHide") }}</div>
-            <p>{{ t("autoHideHint") }}</p>
-          </div>
-          <button
-            type="button"
-            class="switch"
-            role="switch"
-            :aria-checked="store.settings.autoHide"
-            :aria-label="t('autoHide')"
-            @click="toggle('autoHide')"
-          >
-            <span></span>
-          </button>
-        </div>
-
-        <div class="row">
-          <div>
-            <div class="label">{{ t("guide") }}</div>
-            <p>{{ t("guideHint") }}</p>
-          </div>
-          <button type="button" class="text" @click="store.replayGuide()">{{ t("guideAgain") }}</button>
         </div>
 
         <div class="row">
