@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import markUrl from "../src-tauri/icons/128x128.png";
 import { useSettingsStore } from "./stores/settings";
+import { useI18n } from "./i18n";
 import SettingsView from "./views/SettingsView.vue";
 import WindowControls from "./components/WindowControls.vue";
 import FirstRunGuide from "./components/FirstRunGuide.vue";
@@ -31,21 +32,22 @@ type FilterId = "all" | "text" | "link" | "image" | "code";
 
 type CodeView = "pretty" | "compact" | "raw";
 
-const codeModes: { id: CodeView; label: string }[] = [
-  { id: "pretty", label: "格式化" },
-  { id: "compact", label: "压缩" },
-  { id: "raw", label: "原文" },
-];
+const codeModes = computed(() => [
+  { id: "pretty" as const, label: t("pretty") },
+  { id: "compact" as const, label: t("compact") },
+  { id: "raw" as const, label: t("raw") },
+]);
 
-const filters: { id: FilterId; label: string }[] = [
-  { id: "all", label: "全部" },
-  { id: "text", label: "文本" },
-  { id: "link", label: "链接" },
-  { id: "image", label: "图片" },
-  { id: "code", label: "代码" },
-];
+const filters = computed(() => [
+  { id: "all" as const, label: t("kindAll") },
+  { id: "text" as const, label: t("kindText") },
+  { id: "link" as const, label: t("kindLink") },
+  { id: "image" as const, label: t("kindImage") },
+  { id: "code" as const, label: t("kindCode") },
+]);
 
 const settingsStore = useSettingsStore();
+const { t, locale } = useI18n();
 
 function togglePinned() {
   if (settingsStore.settings.autoHide) return;
@@ -84,27 +86,30 @@ const languageNames: Record<string, string> = {
   java: "Java",
   json: "JSON",
   sql: "SQL",
-  other: "代码",
+  other: "",
 };
 
 function kindLabel(clip: Clip) {
-  if (clip.kind === "link") return "链接";
-  if (clip.kind === "image") return "图片";
-  if (clip.kind === "code") return languageNames[clip.language ?? "other"] ?? "代码";
-  return "文本";
+  if (clip.kind === "link") return t("kindLink");
+  if (clip.kind === "image") return t("kindImage");
+  if (clip.kind === "code") {
+    const name = clip.language && clip.language !== "other" ? languageNames[clip.language] : "";
+    return name || t("kindCode");
+  }
+  return t("kindText");
 }
 
 function imageSize(clip: Clip) {
-  if (!clip.width || !clip.height) return "图片";
+  if (!clip.width || !clip.height) return t("kindImage");
   return `${clip.width} × ${clip.height}`;
 }
 
 /// 图片的副标题承担状态提示，所以识别中、失败这些都显示在这里。
 function ocrLabel(clip: Clip) {
-  if (clip.ocrStatus === "pending") return "正在识别文字";
-  if (clip.ocrStatus === "failed") return "识别失败，可重试";
-  if (clip.ocrStatus === "empty") return "未识别到文字";
-  if (clip.ocrStatus === "done") return `已提取 ${(clip.ocrText ?? "").length} 字`;
+  if (clip.ocrStatus === "pending") return t("ocrPending");
+  if (clip.ocrStatus === "failed") return t("ocrFailed");
+  if (clip.ocrStatus === "empty") return t("ocrEmpty");
+  if (clip.ocrStatus === "done") return t("ocrDone", { n: (clip.ocrText ?? "").length });
   return "";
 }
 
@@ -118,9 +123,9 @@ function itemTitle(clip: Clip) {
 }
 
 function itemSub(clip: Clip) {
-  if (clip.kind !== "image") return `${kindLabel(clip)} · ${clip.content.length} 字`;
+  if (clip.kind !== "image") return t("itemMeta", { kind: kindLabel(clip), n: clip.content.length });
   const status = ocrLabel(clip);
-  return status ? `图片 · ${status}` : "图片";
+  return status ? t("imageMeta", { status }) : t("kindImage");
 }
 
 const searched = computed(() => {
@@ -277,7 +282,7 @@ async function openSelected() {
   notice.value = "";
   try {
     await openLink(clip.id);
-    notice.value = "已在浏览器中打开";
+    notice.value = t("openedBrowser");
   } catch (err) {
     notice.value = err instanceof Error ? err.message : String(err);
   }
@@ -289,7 +294,7 @@ async function copySelected(asText = false) {
   notice.value = "";
   try {
     await copyClip(clip.id, asText, clipView(clip));
-    notice.value = asText ? "已复制文字" : "已复制";
+    notice.value = asText ? t("copiedText") : t("copied");
   } catch (err) {
     notice.value = err instanceof Error ? err.message : String(err);
   }
@@ -402,18 +407,21 @@ function dayLabel(createdAt: number) {
   const date = new Date(createdAt);
   const start = (value: Date) => new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
   const diff = start(new Date()) - start(date);
-  if (diff <= 0) return "今天";
-  if (diff === 86_400_000) return "昨天";
-  return `${date.getMonth() + 1}月${date.getDate()}日`;
+  if (diff <= 0) return t("today");
+  if (diff === 86_400_000) return t("yesterday");
+  if (locale.value === "en") {
+    return date.toLocaleDateString("en", { month: "short", day: "numeric" });
+  }
+  return t("monthDay", { m: date.getMonth() + 1, d: date.getDate() });
 }
 
 function relativeTime(createdAt: number) {
   const delta = Math.max(0, Date.now() - createdAt);
   const minutes = Math.floor(delta / 60000);
-  if (minutes < 1) return "刚刚";
-  if (minutes < 60) return `${minutes} 分钟前`;
+  if (minutes < 1) return t("justNow");
+  if (minutes < 60) return t("minutesAgo", { n: minutes });
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} 小时前`;
+  if (hours < 24) return t("hoursAgo", { n: hours });
   return dayLabel(createdAt);
 }
 
@@ -470,7 +478,7 @@ async function copyColor(rgb: string) {
   notice.value = "";
   try {
     await copyPlain(rgb);
-    notice.value = "已复制 RGB";
+    notice.value = t("copiedRgb");
   } catch (err) {
     notice.value = err instanceof Error ? err.message : String(err);
   }
@@ -543,7 +551,7 @@ onUnmounted(() => {
             class="gear"
             :class="{ on: settingsStore.settings.pinned }"
             :aria-pressed="settingsStore.settings.pinned"
-            :aria-label="settingsStore.settings.pinned ? '取消固定在最前' : '固定在最前'"
+            :aria-label="settingsStore.settings.pinned ? t('unpin') : t('pin')"
             @click="togglePinned"
           >
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -554,8 +562,8 @@ onUnmounted(() => {
           <button
             type="button"
             class="gear"
-            aria-label="截图"
-            :title="`截图 ${settingsStore.settings.captureShortcut}`"
+            :aria-label="t('screenshot')"
+            :title="`${t('screenshot')} ${settingsStore.settings.captureShortcut}`"
             @click="captureScreen"
           >
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -563,7 +571,7 @@ onUnmounted(() => {
               <circle cx="12" cy="12" r="3.2" />
             </svg>
           </button>
-          <button type="button" class="gear" aria-label="设置" @click="view = 'settings'">
+          <button type="button" class="gear" :aria-label="t('settingsTitle')" @click="view = 'settings'">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <circle cx="12" cy="12" r="3" />
               <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
@@ -583,7 +591,7 @@ onUnmounted(() => {
           ref="searchEl"
           v-model="query"
           type="text"
-          placeholder="搜索剪贴板"
+          :placeholder="t('searchPlaceholder')"
           spellcheck="false"
           @input="selected = 0"
         />
@@ -592,7 +600,7 @@ onUnmounted(() => {
             <rect x="6" y="11" width="12" height="9" rx="2.5" />
             <path d="M8.5 11V8a3.5 3.5 0 0 1 7 0v3" />
           </svg>
-          仅本机
+          {{ t("localOnly") }}
         </div>
       </div>
       <div class="tabs" data-tauri-drag-region>
@@ -612,7 +620,7 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <p v-if="settingsStore.settings.pauseRecording" class="paused">记录已暂停，新的复制不会写入历史。</p>
+    <p v-if="settingsStore.settings.pauseRecording" class="paused">{{ t("pausedBanner") }}</p>
 
     <div class="body">
       <section v-if="filtered.length" class="list">
@@ -660,8 +668,8 @@ onUnmounted(() => {
         </template>
       </section>
       <section v-else class="list empty">
-        <p v-if="clips.length === 0">还没有记录。复制一段文字或截一张图后再按 {{ settingsStore.settings.summonShortcut }}。</p>
-        <p v-else>没有匹配的记录。</p>
+        <p v-if="clips.length === 0">{{ t("emptyHistory", { shortcut: settingsStore.settings.summonShortcut }) }}</p>
+        <p v-else>{{ t("emptySearch") }}</p>
       </section>
 
       <section v-if="current" class="preview">
@@ -672,20 +680,20 @@ onUnmounted(() => {
 
         <template v-if="current.kind === 'image'">
           <div class="actions">
-            <button type="button" class="btn" @click="copySelected()">复制图片</button>
+            <button type="button" class="btn" @click="copySelected()">{{ t("copyImage") }}</button>
             <button
               type="button"
               class="btn"
               :disabled="current.ocrStatus !== 'done'"
               @click="copySelected(true)"
             >
-              复制文字
+              {{ t("copyText") }}
             </button>
-            <button type="button" class="btn pri" @click="pasteSelected()">粘贴</button>
+            <button type="button" class="btn pri" @click="pasteSelected()">{{ t("paste") }}</button>
           </div>
           <div class="shotbox">
             <img v-if="currentImage" :src="currentImage" :alt="imageSize(current)" />
-            <p v-else>图片读取中…</p>
+            <p v-else>{{ t("loadingImage") }}</p>
           </div>
           <div class="ocr" :class="{ filled: currentText }">
             <div class="ocr-head">
@@ -695,20 +703,20 @@ onUnmounted(() => {
                   · {{ current.ocrLang }}
                 </template>
               </span>
-              <button type="button" class="link" @click="recognizeSelected">重新识别</button>
+              <button type="button" class="link" @click="recognizeSelected">{{ t("recognizeAgain") }}</button>
             </div>
             <div v-if="currentText" class="card">{{ currentText }}</div>
           </div>
           <div class="facts">
-            <span><b>{{ current.width ?? 0 }}</b> × <b>{{ current.height ?? 0 }}</b> 像素</span>
+            <span><b>{{ current.width ?? 0 }}</b> × <b>{{ current.height ?? 0 }}</b> {{ t("pixels") }}</span>
             <i></i>
-            <span><b>{{ currentText.length }}</b> 字</span>
+            <span><b>{{ currentText.length }}</b> {{ t("chars") }}</span>
           </div>
         </template>
 
         <template v-else>
           <div class="actions" :class="{ 'with-switch': current.kind === 'code' }">
-            <div v-if="current.kind === 'code'" class="seg mini" role="tablist" aria-label="代码显示">
+            <div v-if="current.kind === 'code'" class="seg mini" role="tablist" :aria-label="t('codeView')">
               <button
                 v-for="mode in codeModes"
                 :key="mode.id"
@@ -722,22 +730,22 @@ onUnmounted(() => {
                 {{ mode.label }}
               </button>
             </div>
-            <button v-if="current.kind === 'link'" type="button" class="btn" @click="openSelected()">打开</button>
-            <button type="button" class="btn" @click="copySelected()">复制</button>
-            <button type="button" class="btn pri" @click="pasteSelected()">粘贴</button>
+            <button v-if="current.kind === 'link'" type="button" class="btn" @click="openSelected()">{{ t("open") }}</button>
+            <button type="button" class="btn" @click="copySelected()">{{ t("copy") }}</button>
+            <button type="button" class="btn pri" @click="pasteSelected()">{{ t("paste") }}</button>
           </div>
           <div class="card" :class="{ mono: current.kind !== 'text' }">{{ displayContent }}</div>
           <div class="facts">
-            <span><b>{{ lineCount(displayContent) }}</b> 行</span>
+            <span><b>{{ lineCount(displayContent) }}</b> {{ t("lines") }}</span>
             <i></i>
-            <span><b>{{ displayContent.length }}</b> 字</span>
+            <span><b>{{ displayContent.length }}</b> {{ t("chars") }}</span>
           </div>
           <div
             v-if="(current.kind === 'text' || current.kind === 'code') && colors.length"
             class="spotted"
             :class="{ many: colors.length > 1 }"
           >
-            <div class="sec-title">同时识别到</div>
+            <div class="sec-title">{{ t("alsoFound") }}</div>
             <div v-for="color in colors" :key="color.hex" class="card colorcard">
               <div class="swatch" :style="{ background: color.hex }"></div>
               <div class="vals">
@@ -750,7 +758,7 @@ onUnmounted(() => {
                   <rect x="9" y="9" width="13" height="13" rx="2" />
                   <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
                 </svg>
-                复制 RGB
+                {{ t("copyRgb") }}
               </button>
             </div>
           </div>
@@ -759,18 +767,18 @@ onUnmounted(() => {
         <p v-if="notice" class="notice">{{ notice }}</p>
       </section>
       <section v-else class="preview quiet">
-        <p>选中一条记录后，在这里看完整内容。</p>
+        <p>{{ t("previewEmpty") }}</p>
       </section>
     </div>
 
     <footer>
       <div class="keys">
-        <span><kbd>↑</kbd><kbd>↓</kbd> 选择</span>
-        <span><kbd>Enter</kbd> 粘贴</span>
-        <span><kbd>Shift</kbd><kbd>Enter</kbd> 粘贴文字</span>
-        <span><kbd>Esc</kbd> 关闭</span>
+        <span><kbd>↑</kbd><kbd>↓</kbd> {{ t("select") }}</span>
+        <span><kbd>Enter</kbd> {{ t("paste") }}</span>
+        <span><kbd>Shift</kbd><kbd>Enter</kbd> {{ t("pasteText") }}</span>
+        <span><kbd>Esc</kbd> {{ t("close") }}</span>
       </div>
-      <div class="count">{{ settingsStore.settings.summonShortcut }} · {{ clips.length }} 条</div>
+      <div class="count">{{ t("itemCount", { shortcut: settingsStore.settings.summonShortcut, n: clips.length }) }}</div>
     </footer>
     <FirstRunGuide v-if="settingsStore.guideOpen" />
   </main>

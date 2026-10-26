@@ -31,6 +31,8 @@ pub struct Settings {
     pub pinned: bool,
     /// 已经看过或跳过首次教程。
     pub guide_seen: bool,
+    /// 界面语言。zh-CN 或 en。
+    pub language: String,
 }
 
 impl Default for Settings {
@@ -46,6 +48,7 @@ impl Default for Settings {
             auto_hide: false,
             pinned: false,
             guide_seen: false,
+            language: "zh-CN".into(),
         }
     }
 }
@@ -63,6 +66,7 @@ pub struct SettingsPatch {
     pub auto_hide: Option<bool>,
     pub pinned: Option<bool>,
     pub guide_seen: Option<bool>,
+    pub language: Option<String>,
 }
 
 pub fn load() -> Settings {
@@ -129,6 +133,9 @@ pub fn update(app: &AppHandle, patch: SettingsPatch) -> Result<Settings, String>
         guard.shortcut_capture = false;
     }
     tray::set_paused(next.pause_recording);
+    if next.language != current.language {
+        tray::apply_language(&next.language);
+    }
     if next.auto_hide != current.auto_hide || next.pinned != current.pinned {
         panel::apply_auto_hide(app, next.auto_hide);
     }
@@ -240,11 +247,15 @@ fn configured_shortcuts(app: &AppHandle) -> Option<(String, String)> {
 
 fn merge(current: Settings, patch: SettingsPatch) -> Result<Settings, String> {
     let mut next = current;
+    if let Some(language) = patch.language {
+        next.language = normalize_language(&language)?;
+    }
+    let lang = next.language.clone();
     if let Some(shortcut) = patch.summon_shortcut {
-        next.summon_shortcut = normalize_shortcut(&shortcut)?;
+        next.summon_shortcut = normalize_shortcut(&shortcut, &lang)?;
     }
     if let Some(shortcut) = patch.capture_shortcut {
-        next.capture_shortcut = normalize_shortcut(&shortcut)?;
+        next.capture_shortcut = normalize_shortcut(&shortcut, &lang)?;
     }
     if let Some(value) = patch.launch_at_login {
         next.launch_at_login = value;
@@ -274,20 +285,23 @@ fn merge(current: Settings, patch: SettingsPatch) -> Result<Settings, String> {
         next.pinned = false;
     }
     if next.summon_shortcut == next.capture_shortcut {
-        return Err("呼出和截图不能使用同一个快捷键".into());
+        return Err(say(&lang, "呼出和截图不能使用同一个快捷键", "Summon and screenshot cannot use the same shortcut"));
     }
     Ok(next)
 }
 
 fn normalize_loaded(mut settings: Settings) -> Settings {
-    settings.summon_shortcut = normalize_shortcut(&settings.summon_shortcut).unwrap_or_else(|_| SUMMON_DEFAULT.into());
-    settings.capture_shortcut = normalize_shortcut(&settings.capture_shortcut).unwrap_or_else(|_| CAPTURE_DEFAULT.into());
+    settings.summon_shortcut = normalize_shortcut(&settings.summon_shortcut, "zh-CN").unwrap_or_else(|_| SUMMON_DEFAULT.into());
+    settings.capture_shortcut = normalize_shortcut(&settings.capture_shortcut, "zh-CN").unwrap_or_else(|_| CAPTURE_DEFAULT.into());
     if settings.summon_shortcut == settings.capture_shortcut {
         settings.summon_shortcut = SUMMON_DEFAULT.into();
         settings.capture_shortcut = CAPTURE_DEFAULT.into();
     }
     if normalize_theme(&settings.theme).is_err() {
         settings.theme = "system".into();
+    }
+    if normalize_language(&settings.language).is_err() {
+        settings.language = "zh-CN".into();
     }
     if settings.auto_hide {
         settings.pinned = false;
@@ -302,16 +316,27 @@ fn normalize_theme(theme: &str) -> Result<String, String> {
     }
 }
 
-fn normalize_shortcut(raw: &str) -> Result<String, String> {
+fn normalize_language(language: &str) -> Result<String, String> {
+    match language {
+        "zh-CN" | "en" => Ok(language.to_string()),
+        _ => Err("语言只能是简体中文或英语".into()),
+    }
+}
+
+fn say(lang: &str, zh: &str, en: &str) -> String {
+    if lang == "en" { en.to_string() } else { zh.to_string() }
+}
+
+fn normalize_shortcut(raw: &str, lang: &str) -> Result<String, String> {
     let prepared = prepare_shortcut(raw);
     let shortcut: Shortcut = prepared
         .parse()
-        .map_err(|_| format!("无法识别快捷键 {raw}"))?;
+        .map_err(|_| say(lang, &format!("无法识别快捷键 {raw}"), &format!("Could not read shortcut {raw}")))?;
     if shortcut.mods.is_empty() {
-        return Err("请至少带上 Ctrl、Alt、Shift 或 Win".into());
+        return Err(say(lang, "请至少带上 Ctrl、Alt、Shift 或 Win", "Include Ctrl, Alt, Shift, or Win"));
     }
     if shortcut.key == Code::Escape {
-        return Err("Esc 用来关闭窗口，不能用作快捷键".into());
+        return Err(say(lang, "Esc 用来关闭窗口，不能用作快捷键", "Esc closes the window and cannot be a shortcut"));
     }
     Ok(friendly(&shortcut))
 }
@@ -499,14 +524,14 @@ mod tests {
 
     #[test]
     fn normalizes_modifier_order_and_case() {
-        assert_eq!(normalize_shortcut("shift+alt+v").unwrap(), "Alt+Shift+V");
-        assert_eq!(normalize_shortcut("win+c").unwrap(), "Win+C");
+        assert_eq!(normalize_shortcut("shift+alt+v", "zh-CN").unwrap(), "Alt+Shift+V");
+        assert_eq!(normalize_shortcut("win+c", "zh-CN").unwrap(), "Win+C");
     }
 
     #[test]
     fn rejects_bare_keys_escape_and_duplicates() {
-        assert!(normalize_shortcut("V").is_err());
-        assert!(normalize_shortcut("Ctrl+Esc").is_err());
+        assert!(normalize_shortcut("V", "zh-CN").is_err());
+        assert!(normalize_shortcut("Ctrl+Esc", "zh-CN").is_err());
         let current = Settings::default();
         let err = merge(
             current,

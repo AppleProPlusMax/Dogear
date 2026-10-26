@@ -2,7 +2,10 @@
 import { computed, ref } from "vue";
 import { useSettingsStore } from "../stores/settings";
 
+import { useI18n } from "../i18n";
+
 const settings = useSettingsStore();
+const { t } = useI18n();
 const index = ref(0);
 
 const steps = computed(() => {
@@ -10,18 +13,18 @@ const steps = computed(() => {
   const capture = settings.settings.captureShortcut;
   return [
     {
-      title: "关掉也会留着",
-      copy: "缩小收到任务栏，关闭收到托盘。Dogear 还在运行。要退出，右键托盘图标，选退出。",
+      title: t("guide1Title"),
+      copy: t("guide1Copy"),
       keys: [] as string[],
     },
     {
-      title: `按 ${summon} 再打开`,
-      copy: `点到别的窗口，它会留在任务栏。按 ${summon} 隐藏，再按一次打开。下次启动时，它先停在托盘里。`,
+      title: t("guide2Title", { shortcut: summon }),
+      copy: t("guide2Copy", { shortcut: summon }),
       keys: [summon],
     },
     {
-      title: "选中后按回车",
-      copy: `复制过的内容会出现在列表里。选中一条，按回车，贴回刚才的窗口。要截图，点标题栏图标、托盘里的截图，或按 ${capture}。`,
+      title: t("guide3Title"),
+      copy: t("guide3Copy", { shortcut: capture }),
       keys: ["Enter", capture],
     },
   ];
@@ -61,22 +64,22 @@ function skip() {
           </template>
         </span>
       </div>
-      <div class="dots" role="tablist" aria-label="教程步骤">
+      <div class="dots" role="tablist" :aria-label="t('guideSteps')">
         <button
           v-for="(item, dot) in steps"
           :key="item.title"
           type="button"
           role="tab"
           :aria-selected="dot === index"
-          :aria-label="`第 ${dot + 1} 步`"
+          :aria-label="t('guideStep', { n: dot + 1 })"
           @click="index = dot"
         >
           {{ dot + 1 }}
         </button>
       </div>
       <div class="actions">
-        <button type="button" @click="skip">跳过</button>
-        <button type="button" class="pri" @click="next">{{ last ? "开始使用" : "下一步" }}</button>
+        <button type="button" @click="skip">{{ t("skip") }}</button>
+        <button type="button" class="pri" @click="next">{{ last ? t("start") : t("next") }}</button>
       </div>
     </div>
   </div>

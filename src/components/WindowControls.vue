@@ -2,7 +2,10 @@
 import { hidePanel, minimizePanel } from "../api";
 import { useSettingsStore } from "../stores/settings";
 
+import { useI18n } from "../i18n";
+
 const settings = useSettingsStore();
+const { t } = useI18n();
 
 function minimize() {
   void minimizePanel().catch(() => {});
@@ -15,12 +18,12 @@ function close() {
 
 <template>
   <span v-if="!settings.settings.autoHide" class="controls">
-    <button type="button" aria-label="缩小" @click="minimize">
+    <button type="button" :aria-label="t('minimize')" @click="minimize">
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="M5 12h14" />
       </svg>
     </button>
-    <button type="button" aria-label="关闭" @click="close">
+    <button type="button" :aria-label="t('close')" @click="close">
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="M7 7l10 10M17 7L7 17" />
       </svg>

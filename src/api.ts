@@ -107,6 +107,7 @@ export function getEffectState(): Promise<EffectState> {
 }
 
 export type ThemePreference = "system" | "light" | "dark";
+export type AppLocale = "zh-CN" | "en";
 
 export interface Settings {
   summonShortcut: string;
@@ -119,6 +120,7 @@ export interface Settings {
   autoHide: boolean;
   pinned: boolean;
   guideSeen: boolean;
+  language: AppLocale;
 }
 
 export type SettingsPatch = Partial<Settings>;

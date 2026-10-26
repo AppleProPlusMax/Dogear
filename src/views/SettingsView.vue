@@ -1,19 +1,25 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { getVersion } from "@tauri-apps/api/app";
-import type { ThemePreference } from "../api";
 import { useSettingsStore, type ShortcutField } from "../stores/settings";
+import { useI18n, type AppLocale } from "../i18n";
 import WindowControls from "../components/WindowControls.vue";
 
 const emit = defineEmits<{ back: [] }>();
 const store = useSettingsStore();
+const { t } = useI18n();
 const version = ref("");
 
-const themes: { id: ThemePreference; label: string }[] = [
-  { id: "system", label: "跟随系统" },
-  { id: "light", label: "浅色" },
-  { id: "dark", label: "深色" },
+const languages: { id: AppLocale; label: string }[] = [
+  { id: "zh-CN", label: "简体中文" },
+  { id: "en", label: "English" },
 ];
+
+const themes = computed(() => [
+  { id: "system" as const, label: t("themeSystem") },
+  { id: "light" as const, label: t("themeLight") },
+  { id: "dark" as const, label: t("themeDark") },
+]);
 
 const summonParts = computed(() => store.settings.summonShortcut.split("+"));
 const captureParts = computed(() => store.settings.captureShortcut.split("+"));
@@ -70,7 +76,7 @@ async function onCaptureKey(event: KeyboardEvent) {
   }
   const key = tokenFromCode(event.code);
   if (!key) {
-    store.error = "这个按键不能用作快捷键";
+    store.error = t("keyRejected");
     return;
   }
   const mods: string[] = [];
@@ -79,7 +85,7 @@ async function onCaptureKey(event: KeyboardEvent) {
   if (event.shiftKey) mods.push("Shift");
   if (event.metaKey) mods.push("Win");
   if (mods.length === 0) {
-    store.error = "请至少带上 Ctrl、Alt、Shift 或 Win";
+    store.error = t("needModifier");
     return;
   }
   try {
@@ -115,58 +121,77 @@ onUnmounted(() => {
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M15 6l-6 6 6 6" />
         </svg>
-        返回
+        {{ t("back") }}
       </button>
-      <h1>设置</h1>
+      <h1>{{ t("settingsTitle") }}</h1>
       <span class="edge"><WindowControls /></span>
     </header>
 
     <div class="body">
       <section>
-        <h2>通用</h2>
+        <h2>{{ t("general") }}</h2>
         <div class="row">
           <div>
-            <div class="label">呼出快捷键</div>
-            <p>显示或隐藏历史窗口</p>
+            <div class="label">{{ t("language") }}</div>
+            <p>{{ t("languageHint") }}</p>
+          </div>
+          <div class="seg" role="radiogroup" :aria-label="t('language')">
+            <button
+              v-for="item in languages"
+              :key="item.id"
+              type="button"
+              role="radio"
+              :aria-checked="store.settings.language === item.id"
+              :class="{ on: store.settings.language === item.id }"
+              @click="store.setLanguage(item.id)"
+            >
+              {{ item.label }}
+            </button>
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <div class="label">{{ t("summon") }}</div>
+            <p>{{ t("summonHint") }}</p>
           </div>
           <div class="control">
             <span class="keys">
               <kbd v-for="part in parts('summon')" :key="part">{{ part }}</kbd>
             </span>
             <button type="button" class="text" @click="store.startCapture('summon')">
-              {{ store.capturing === "summon" ? "请按键" : "更改" }}
+              {{ store.capturing === "summon" ? t("pressKeys") : t("change") }}
             </button>
           </div>
         </div>
-        <p v-if="store.capturing === 'summon'" class="capture-hint">按下组合键，Esc 取消</p>
+        <p v-if="store.capturing === 'summon'" class="capture-hint">{{ t("captureHintKeys") }}</p>
 
         <div class="row">
           <div>
-            <div class="label">截图快捷键</div>
-            <p>开始框选截图</p>
+            <div class="label">{{ t("capture") }}</div>
+            <p>{{ t("captureHint") }}</p>
           </div>
           <div class="control">
             <span class="keys">
               <kbd v-for="part in parts('capture')" :key="part">{{ part }}</kbd>
             </span>
             <button type="button" class="text" @click="store.startCapture('capture')">
-              {{ store.capturing === "capture" ? "请按键" : "更改" }}
+              {{ store.capturing === "capture" ? t("pressKeys") : t("change") }}
             </button>
           </div>
         </div>
-        <p v-if="store.capturing === 'capture'" class="capture-hint">按下组合键，Esc 取消</p>
+        <p v-if="store.capturing === 'capture'" class="capture-hint">{{ t("captureHintKeys") }}</p>
 
         <div class="row">
           <div>
-            <div class="label">开机自启</div>
-            <p>登录 Windows 后自动打开 Dogear</p>
+            <div class="label">{{ t("launch") }}</div>
+            <p>{{ t("launchHint") }}</p>
           </div>
           <button
             type="button"
             class="switch"
             role="switch"
             :aria-checked="store.settings.launchAtLogin"
-            aria-label="开机自启"
+            :aria-label="t('launch')"
             @click="toggle('launchAtLogin')"
           >
             <span></span>
@@ -175,15 +200,15 @@ onUnmounted(() => {
 
         <div class="row">
           <div>
-            <div class="label">暂停记录</div>
-            <p>暂停后，新的复制不会记入历史。截图仍然保留</p>
+            <div class="label">{{ t("pause") }}</div>
+            <p>{{ t("pauseHint") }}</p>
           </div>
           <button
             type="button"
             class="switch"
             role="switch"
             :aria-checked="store.settings.pauseRecording"
-            aria-label="暂停记录"
+            :aria-label="t('pause')"
             @click="toggle('pauseRecording')"
           >
             <span></span>
@@ -192,15 +217,15 @@ onUnmounted(() => {
 
         <div class="row">
           <div>
-            <div class="label">失焦后自动隐藏</div>
-            <p>关掉后，点到别的窗口不会收起，用标题栏的缩小和关闭</p>
+            <div class="label">{{ t("autoHide") }}</div>
+            <p>{{ t("autoHideHint") }}</p>
           </div>
           <button
             type="button"
             class="switch"
             role="switch"
             :aria-checked="store.settings.autoHide"
-            aria-label="失焦后自动隐藏"
+            :aria-label="t('autoHide')"
             @click="toggle('autoHide')"
           >
             <span></span>
@@ -209,21 +234,21 @@ onUnmounted(() => {
 
         <div class="row">
           <div>
-            <div class="label">使用教程</div>
-            <p>再看一遍关闭、呼出和粘贴</p>
+            <div class="label">{{ t("guide") }}</div>
+            <p>{{ t("guideHint") }}</p>
           </div>
-          <button type="button" class="text" @click="store.replayGuide()">再看一遍</button>
+          <button type="button" class="text" @click="store.replayGuide()">{{ t("guideAgain") }}</button>
         </div>
       </section>
 
       <section>
-        <h2>外观</h2>
+        <h2>{{ t("appearance") }}</h2>
         <div class="row">
           <div>
-            <div class="label">主题</div>
-            <p>默认跟随系统深浅色</p>
+            <div class="label">{{ t("theme") }}</div>
+            <p>{{ t("themeHint") }}</p>
           </div>
-          <div class="seg" role="radiogroup" aria-label="主题">
+          <div class="seg" role="radiogroup" :aria-label="t('theme')">
             <button
               v-for="item in themes"
               :key="item.id"
@@ -239,15 +264,15 @@ onUnmounted(() => {
         </div>
         <div class="row">
           <div>
-            <div class="label">减少透明效果</div>
-            <p>改用纯色面板，适合显卡或远程桌面</p>
+            <div class="label">{{ t("reduceTransparency") }}</div>
+            <p>{{ t("reduceTransparencyHint") }}</p>
           </div>
           <button
             type="button"
             class="switch"
             role="switch"
             :aria-checked="store.settings.reduceTransparency"
-            aria-label="减少透明效果"
+            :aria-label="t('reduceTransparency')"
             @click="toggle('reduceTransparency')"
           >
             <span></span>
@@ -256,18 +281,18 @@ onUnmounted(() => {
       </section>
 
       <section>
-        <h2>识别</h2>
+        <h2>{{ t("recognition") }}</h2>
         <div class="row">
           <div>
-            <div class="label">复制图片后自动识别</div>
-            <p>关闭后仍可在预览里手动重新识别</p>
+            <div class="label">{{ t("ocrAuto") }}</div>
+            <p>{{ t("ocrAutoHint") }}</p>
           </div>
           <button
             type="button"
             class="switch"
             role="switch"
             :aria-checked="store.settings.ocrAuto"
-            aria-label="复制图片后自动识别"
+            :aria-label="t('ocrAuto')"
             @click="toggle('ocrAuto')"
           >
             <span></span>
@@ -276,7 +301,7 @@ onUnmounted(() => {
       </section>
 
       <p v-if="store.error" class="error">{{ store.error }}</p>
-      <p v-if="version" class="version">版本 {{ version }}</p>
+      <p v-if="version" class="version">{{ t("version", { version }) }}</p>
     </div>
   </main>
 </template>

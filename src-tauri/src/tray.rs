@@ -13,19 +13,32 @@ use crate::state::AppState;
 const DOGEAR_ICON: &[u8] = include_bytes!("../icons/128x128.png");
 
 static PAUSE: OnceLock<CheckMenuItem<Wry>> = OnceLock::new();
+static OPEN: OnceLock<MenuItem<Wry>> = OnceLock::new();
+static CAPTURE: OnceLock<MenuItem<Wry>> = OnceLock::new();
+static SETTINGS_ITEM: OnceLock<MenuItem<Wry>> = OnceLock::new();
+static QUIT: OnceLock<MenuItem<Wry>> = OnceLock::new();
 
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
-    let paused = app
+    let (paused, language) = app
         .try_state::<Mutex<AppState>>()
-        .and_then(|state| state.lock().ok().map(|guard| guard.settings.pause_recording))
-        .unwrap_or(false);
-    let open = MenuItem::with_id(app, "open", "打开", true, None::<&str>)?;
-    let capture = MenuItem::with_id(app, "capture", "截图", true, None::<&str>)?;
-    let pause = CheckMenuItem::with_id(app, "pause", "暂停记录", true, paused, None::<&str>)?;
-    let settings_item = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+        .and_then(|state| {
+            state.lock().ok().map(|guard| {
+                (guard.settings.pause_recording, guard.settings.language.clone())
+            })
+        })
+        .unwrap_or((false, "zh-CN".into()));
+    let labels = tray_labels(&language);
+    let open = MenuItem::with_id(app, "open", labels.open, true, None::<&str>)?;
+    let capture = MenuItem::with_id(app, "capture", labels.capture, true, None::<&str>)?;
+    let pause = CheckMenuItem::with_id(app, "pause", labels.pause, true, paused, None::<&str>)?;
+    let settings_item = MenuItem::with_id(app, "settings", labels.settings, true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", labels.quit, true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &capture, &pause, &settings_item, &quit])?;
     let _ = PAUSE.set(pause);
+    let _ = OPEN.set(open);
+    let _ = CAPTURE.set(capture);
+    let _ = SETTINGS_ITEM.set(settings_item);
+    let _ = QUIT.set(quit);
     let tray = TrayIconBuilder::with_id("dogear")
         .icon(dogear_icon()?)
         .tooltip("Dogear")
@@ -60,6 +73,53 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
 pub fn set_paused(paused: bool) {
     if let Some(item) = PAUSE.get() {
         let _ = item.set_checked(paused);
+    }
+}
+
+pub fn apply_language(language: &str) {
+    let labels = tray_labels(language);
+    if let Some(item) = OPEN.get() {
+        let _ = item.set_text(labels.open);
+    }
+    if let Some(item) = CAPTURE.get() {
+        let _ = item.set_text(labels.capture);
+    }
+    if let Some(item) = PAUSE.get() {
+        let _ = item.set_text(labels.pause);
+    }
+    if let Some(item) = SETTINGS_ITEM.get() {
+        let _ = item.set_text(labels.settings);
+    }
+    if let Some(item) = QUIT.get() {
+        let _ = item.set_text(labels.quit);
+    }
+}
+
+struct TrayLabels {
+    open: &'static str,
+    capture: &'static str,
+    pause: &'static str,
+    settings: &'static str,
+    quit: &'static str,
+}
+
+fn tray_labels(language: &str) -> TrayLabels {
+    if language == "en" {
+        TrayLabels {
+            open: "Open",
+            capture: "Screenshot",
+            pause: "Pause recording",
+            settings: "Settings",
+            quit: "Quit",
+        }
+    } else {
+        TrayLabels {
+            open: "打开",
+            capture: "截图",
+            pause: "暂停记录",
+            settings: "设置",
+            quit: "退出",
+        }
     }
 }
 

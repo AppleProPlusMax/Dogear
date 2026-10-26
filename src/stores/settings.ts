@@ -6,10 +6,12 @@ import {
   endShortcutCapture,
   getSettings,
   updateSettings,
+  type AppLocale,
   type Settings,
   type SettingsPatch,
   type ThemePreference,
 } from "../api";
+import { applyLocale } from "../i18n";
 
 const defaults: Settings = {
   summonShortcut: "Alt+V",
@@ -22,6 +24,7 @@ const defaults: Settings = {
   autoHide: false,
   pinned: false,
   guideSeen: false,
+  language: "zh-CN",
 };
 
 export type ShortcutField = "summon" | "capture";
@@ -49,6 +52,7 @@ export const useSettingsStore = defineStore("settings", () => {
       try {
         settings.value = await getSettings();
         applyTheme(settings.value.theme);
+        applyLocale(settings.value.language);
         guideOpen.value = !settings.value.guideSeen;
         loaded = true;
       } catch (err) {
@@ -60,6 +64,7 @@ export const useSettingsStore = defineStore("settings", () => {
       await listen<Settings>("settings-changed", (event) => {
         settings.value = event.payload;
         applyTheme(event.payload.theme);
+        applyLocale(event.payload.language);
       });
       await listen("shortcut-capture-cancel", () => {
         capturing.value = null;
@@ -72,10 +77,16 @@ export const useSettingsStore = defineStore("settings", () => {
     try {
       settings.value = await updateSettings(patch);
       applyTheme(settings.value.theme);
+      applyLocale(settings.value.language);
     } catch (err) {
       error.value = message(err);
       throw err;
     }
+  }
+
+  async function setLanguage(language: AppLocale) {
+    if (settings.value.language === language) return;
+    await update({ language });
   }
 
   async function setTheme(theme: ThemePreference) {
@@ -138,6 +149,7 @@ export const useSettingsStore = defineStore("settings", () => {
     load,
     update,
     setTheme,
+    setLanguage,
     startCapture,
     commitCapture,
     cancelCapture,
