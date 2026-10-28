@@ -140,7 +140,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
 }
 
 fn on_clipboard(app: &AppHandle) {
-    if recording_paused(app) {
+    if clipboard::consume_skipped_listener() || recording_paused(app) {
         return;
     }
     match clipboard::read() {

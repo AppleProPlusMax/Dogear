@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -28,6 +29,21 @@ use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM
 const MAX_CHARS: usize = 1_000_000;
 /// 超过这个像素数就不收录，避免一张超大图把内存吃满。
 const MAX_PIXELS: i64 = 64_000_000;
+
+/// 自己写入剪切板时跳过紧接着的那一次监听，避免监听线程再把图读回来时卡住。
+static SKIP_LISTENER: AtomicBool = AtomicBool::new(false);
+
+fn skip_listener_once() {
+    SKIP_LISTENER.store(true, Ordering::SeqCst);
+}
+
+fn clear_skipped_listener() {
+    SKIP_LISTENER.store(false, Ordering::SeqCst);
+}
+
+pub fn consume_skipped_listener() -> bool {
+    SKIP_LISTENER.swap(false, Ordering::SeqCst)
+}
 
 struct SelfWrite {
     text: String,
@@ -206,28 +222,41 @@ pub fn write_text(text: &str) -> Result<(), String> {
     let mut wide: Vec<u16> = text.encode_utf16().collect();
     wide.push(0);
     let bytes = wide.len() * std::mem::size_of::<u16>();
+    skip_listener_once();
     unsafe {
-        let handle = GlobalAlloc(GMEM_MOVEABLE, bytes).map_err(|err| err.to_string())?;
+        let handle = match GlobalAlloc(GMEM_MOVEABLE, bytes) {
+            Ok(handle) => handle,
+            Err(err) => {
+                clear_skipped_listener();
+                return Err(err.to_string());
+            }
+        };
         let locked = GlobalLock(handle);
         if locked.is_null() {
+            clear_skipped_listener();
             return Err("无法锁定剪切板内存".into());
         }
         std::ptr::copy_nonoverlapping(wide.as_ptr(), locked as *mut u16, wide.len());
         let _ = GlobalUnlock(handle);
-        OpenClipboard(None).map_err(|err| err.to_string())?;
+        if OpenClipboard(None).is_err() {
+            clear_skipped_listener();
+            return Err("无法打开剪切板".into());
+        }
         if EmptyClipboard().is_err() {
             let _ = CloseClipboard();
+            clear_skipped_listener();
             return Err("无法清空剪切板".into());
         }
         mark_self_write(text);
         let set = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(handle.0)));
         let _ = CloseClipboard();
-        set.map_err(|err| {
+        if let Err(err) = set {
+            clear_skipped_listener();
             if let Ok(mut guard) = LAST_WRITE.lock() {
                 *guard = None;
             }
-            err.to_string()
-        })?;
+            return Err(err.to_string());
+        }
     }
     Ok(())
 }
@@ -236,14 +265,31 @@ pub fn write_text(text: &str) -> Result<(), String> {
 pub fn write_image(png: &[u8], hash: &str) -> Result<(), String> {
     let decoded = crate::images::decode(png)?;
     let dib = build_dib(decoded.width, decoded.height, &decoded.bgra)?;
+    skip_listener_once();
     unsafe {
         let png_format = RegisterClipboardFormatW(w!("PNG"));
-        let png_handle = alloc_global(png)?;
-        let dib_handle = alloc_global(&dib)?;
+        let png_handle = match alloc_global(png) {
+            Ok(handle) => handle,
+            Err(err) => {
+                clear_skipped_listener();
+                return Err(err);
+            }
+        };
+        let dib_handle = match alloc_global(&dib) {
+            Ok(handle) => handle,
+            Err(err) => {
+                clear_skipped_listener();
+                return Err(err);
+            }
+        };
 
-        OpenClipboard(None).map_err(|err| err.to_string())?;
+        if OpenClipboard(None).is_err() {
+            clear_skipped_listener();
+            return Err("无法打开剪切板".into());
+        }
         if EmptyClipboard().is_err() {
             let _ = CloseClipboard();
+            clear_skipped_listener();
             return Err("无法清空剪切板".into());
         }
         mark_self_image(hash);
@@ -252,12 +298,13 @@ pub fn write_image(png: &[u8], hash: &str) -> Result<(), String> {
         }
         let set = SetClipboardData(CF_DIB, Some(HANDLE(dib_handle.0)));
         let _ = CloseClipboard();
-        set.map_err(|err| {
+        if let Err(err) = set {
+            clear_skipped_listener();
             if let Ok(mut guard) = LAST_IMAGE.lock() {
                 *guard = None;
             }
-            err.to_string()
-        })?;
+            return Err(err.to_string());
+        }
     }
     Ok(())
 }
@@ -340,24 +387,98 @@ unsafe fn read_image() -> ClipboardRead {
             }
         }
     }
-    // 走 GDI：无论源是 DIB、DIBV5 还是位图，都统一拿到 32 位 BGRA。
+    // 直接拷贝 DIB 字节。拿着剪切板调用 GetDIBits 会和界面线程互相卡住。
+    for format in [CF_DIBV5, CF_DIB] {
+        if IsClipboardFormatAvailable(format).is_err() {
+            continue;
+        }
+        let Some(bytes) = read_global(format) else {
+            continue;
+        };
+        if let Some((width, height, bgra)) = decode_dib(&bytes) {
+            return image_from_bgra(width, height, &bgra);
+        }
+    }
     match read_bitmap() {
-        Ok(Some((width, height, bgra))) => match crate::images::encode(width, height, &bgra) {
-            Ok(png) => {
-                let hash = crate::images::hash(&png);
-                ClipboardRead::Image(ImageData { png, hash })
-            }
-            Err(err) => {
-                eprintln!("剪切板图片编码失败: {err}");
-                ClipboardRead::Empty
-            }
-        },
+        Ok(Some((width, height, bgra))) => image_from_bgra(width, height, &bgra),
         Ok(None) => ClipboardRead::Ignored,
         Err(err) => {
             eprintln!("剪切板图片读取失败: {err}");
             ClipboardRead::Empty
         }
     }
+}
+
+fn image_from_bgra(width: u32, height: u32, bgra: &[u8]) -> ClipboardRead {
+    match crate::images::encode(width, height, bgra) {
+        Ok(png) => {
+            let hash = crate::images::hash(&png);
+            ClipboardRead::Image(ImageData { png, hash })
+        }
+        Err(err) => {
+            eprintln!("剪切板图片编码失败: {err}");
+            ClipboardRead::Empty
+        }
+    }
+}
+
+/// 把 CF_DIB / CF_DIBV5 的像素读成自上而下的 BGRA。不调用 GDI。
+fn decode_dib(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    if bytes.len() < 40 {
+        return None;
+    }
+    let header = u32::from_le_bytes(bytes[0..4].try_into().ok()?) as usize;
+    if header < 40 || bytes.len() < header {
+        return None;
+    }
+    let width = i32::from_le_bytes(bytes[4..8].try_into().ok()?);
+    let height = i32::from_le_bytes(bytes[8..12].try_into().ok()?);
+    let planes = u16::from_le_bytes(bytes[12..14].try_into().ok()?);
+    let bit_count = u16::from_le_bytes(bytes[14..16].try_into().ok()?);
+    let compression = u32::from_le_bytes(bytes[16..20].try_into().ok()?);
+    if planes != 1 || width <= 0 || height == 0 || (bit_count != 24 && bit_count != 32) {
+        return None;
+    }
+    // BI_RGB = 0，BI_BITFIELDS = 3。
+    if compression != 0 && compression != 3 {
+        return None;
+    }
+    let abs_height = height.unsigned_abs();
+    let width_u = width as u32;
+    if i64::from(width_u) * i64::from(abs_height) > MAX_PIXELS {
+        return None;
+    }
+    let pixel_offset = if compression == 3 { header + 12 } else { header };
+    let row_bytes = ((bit_count as usize * width as usize + 31) / 32) * 4;
+    let needed = pixel_offset + row_bytes * abs_height as usize;
+    if bytes.len() < needed {
+        return None;
+    }
+    let mut bgra = vec![0u8; width as usize * abs_height as usize * 4];
+    let bottom_up = height > 0;
+    for y in 0..abs_height as usize {
+        let src_y = if bottom_up { abs_height as usize - 1 - y } else { y };
+        let src = pixel_offset + src_y * row_bytes;
+        let dst = y * width as usize * 4;
+        if bit_count == 32 {
+            for x in 0..width as usize {
+                let from = src + x * 4;
+                let to = dst + x * 4;
+                bgra[to..to + 3].copy_from_slice(&bytes[from..from + 3]);
+                bgra[to + 3] = 255;
+            }
+        } else {
+            for x in 0..width as usize {
+                let from = src + x * 3;
+                let to = dst + x * 4;
+                bgra[to] = bytes[from];
+                bgra[to + 1] = bytes[from + 1];
+                bgra[to + 2] = bytes[from + 2];
+                bgra[to + 3] = 255;
+            }
+        }
+    }
+    Some((width_u, abs_height, bgra))
 }
 
 unsafe fn read_bitmap() -> Result<Option<(u32, u32, Vec<u8>)>, String> {
@@ -466,5 +587,24 @@ unsafe fn read_unicode() -> ClipboardRead {
         ClipboardRead::Empty
     } else {
         ClipboardRead::Text(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_dib;
+
+    #[test]
+    fn dib_pixels_are_read_without_gdi() {
+        let mut bytes = vec![0u8; 44];
+        bytes[0..4].copy_from_slice(&40u32.to_le_bytes());
+        bytes[4..8].copy_from_slice(&1i32.to_le_bytes());
+        bytes[8..12].copy_from_slice(&1i32.to_le_bytes());
+        bytes[12..14].copy_from_slice(&1u16.to_le_bytes());
+        bytes[14..16].copy_from_slice(&32u16.to_le_bytes());
+        bytes[40..44].copy_from_slice(&[1, 2, 3, 0]);
+        let (width, height, bgra) = decode_dib(&bytes).unwrap();
+        assert_eq!((width, height), (1, 1));
+        assert_eq!(bgra, vec![1, 2, 3, 255]);
     }
 }

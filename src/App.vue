@@ -62,6 +62,26 @@ const query = ref("");
 const filter = ref<FilterId>("all");
 const selected = ref(0);
 const notice = ref("");
+let noticeTimer = 0;
+let suppressNoticeClear = false;
+
+function showNotice(message: string) {
+  notice.value = message;
+  suppressNoticeClear = true;
+  queueMicrotask(() => {
+    suppressNoticeClear = false;
+  });
+  window.clearTimeout(noticeTimer);
+  noticeTimer = window.setTimeout(() => {
+    if (notice.value === message) notice.value = "";
+  }, 1600);
+}
+
+function clearNotice() {
+  suppressNoticeClear = false;
+  window.clearTimeout(noticeTimer);
+  notice.value = "";
+}
 const codeView = ref<CodeView>("pretty");
 const shownCode = ref("");
 const colors = ref<FoundColor[]>([]);
@@ -244,7 +264,7 @@ async function loadFullImage() {
   try {
     fullImages.value[clip.id] = await clipImage(clip.id);
   } catch (err) {
-    notice.value = err instanceof Error ? err.message : String(err);
+    showNotice(err instanceof Error ? err.message : String(err));
   }
 }
 
@@ -278,35 +298,35 @@ function focusSearch() {
 async function pasteSelected(asText = false) {
   const clip = current.value;
   if (!clip) return;
-  notice.value = "";
+  clearNotice();
   try {
     await pasteClip(clip.id, asText, clipView(clip));
   } catch (err) {
-    notice.value = err instanceof Error ? err.message : String(err);
+    showNotice(err instanceof Error ? err.message : String(err));
   }
 }
 
 async function openSelected() {
   const clip = current.value;
   if (!clip || clip.kind !== "link") return;
-  notice.value = "";
+  clearNotice();
   try {
     await openLink(clip.id);
-    notice.value = t("openedBrowser");
+    showNotice(t("openedBrowser"));
   } catch (err) {
-    notice.value = err instanceof Error ? err.message : String(err);
+    showNotice(err instanceof Error ? err.message : String(err));
   }
 }
 
 async function copySelected(asText = false) {
   const clip = current.value;
   if (!clip) return;
-  notice.value = "";
+  clearNotice();
   try {
     await copyClip(clip.id, asText, clipView(clip));
-    notice.value = asText ? t("copiedText") : t("copied");
+    showNotice(asText ? t("copiedText") : t("copied"));
   } catch (err) {
-    notice.value = err instanceof Error ? err.message : String(err);
+    showNotice(err instanceof Error ? err.message : String(err));
   }
 }
 
@@ -322,7 +342,7 @@ async function toggleFavorite() {
     }
   } catch (err) {
     clip.pinned = previous;
-    notice.value = err instanceof Error ? err.message : String(err);
+    showNotice(err instanceof Error ? err.message : String(err));
   }
 }
 
@@ -330,7 +350,7 @@ async function deleteSelected() {
   const clip = current.value;
   if (!clip) return;
   const id = clip.id;
-  notice.value = "";
+  clearNotice();
   try {
     await deleteClip(id);
     const index = clips.value.findIndex((item) => item.id === id);
@@ -339,16 +359,16 @@ async function deleteSelected() {
     if (selected.value >= filtered.value.length) {
       selected.value = Math.max(0, filtered.value.length - 1);
     }
-    notice.value = t("removedItem");
+    showNotice(t("removedItem"));
   } catch (err) {
-    notice.value = err instanceof Error ? err.message : String(err);
+    showNotice(err instanceof Error ? err.message : String(err));
   }
 }
 
 async function recognizeSelected() {
   const clip = current.value;
   if (!clip || clip.kind !== "image") return;
-  notice.value = "";
+  clearNotice();
   try {
     const previousStatus = clip.ocrStatus;
     const previousText = clip.ocrText;
@@ -360,7 +380,7 @@ async function recognizeSelected() {
       throw err;
     });
   } catch (err) {
-    notice.value = err instanceof Error ? err.message : String(err);
+    showNotice(err instanceof Error ? err.message : String(err));
   }
 }
 
@@ -395,7 +415,7 @@ function editingText(event: KeyboardEvent) {
 
 function captureScreen() {
   void startCapture().catch((err) => {
-    notice.value = err instanceof Error ? err.message : String(err);
+    showNotice(err instanceof Error ? err.message : String(err));
   });
 }
 
@@ -531,16 +551,17 @@ watch(
 );
 
 async function copyColor(rgb: string) {
-  notice.value = "";
+  clearNotice();
   try {
     await copyPlain(rgb);
-    notice.value = t("copiedRgb");
+    showNotice(t("copiedRgb"));
   } catch (err) {
-    notice.value = err instanceof Error ? err.message : String(err);
+    showNotice(err instanceof Error ? err.message : String(err));
   }
 }
 
 watch(selected, () => {
+  if (!suppressNoticeClear) clearNotice();
   void loadFullImage();
   nextTick(() => {
     document.querySelector(".item.on")?.scrollIntoView({ block: "nearest" });
@@ -576,7 +597,7 @@ onMounted(async () => {
       query.value = "";
       filter.value = "all";
       selected.value = 0;
-      notice.value = "";
+      clearNotice();
       focusSearch();
     }),
     await listen("open-settings", () => {
@@ -600,6 +621,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  window.clearTimeout(noticeTimer);
   window.removeEventListener("keydown", onEscape, true);
   window.removeEventListener("mousedown", onDragPointerDown, true);
   for (const stop of unlisten) stop();

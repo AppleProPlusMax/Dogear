@@ -145,31 +145,48 @@ pub fn preview_code(state: State<'_, Mutex<AppState>>, id: i64, view: String) ->
 }
 
 #[tauri::command]
-pub fn copy_clip(state: State<'_, Mutex<AppState>>, id: i64, as_text: bool, view: Option<String>) -> Result<(), String> {
-    write_payload(&payload(&state, id, as_text, view.as_deref().unwrap_or("raw"))?)
+pub async fn copy_clip(state: State<'_, Mutex<AppState>>, id: i64, as_text: bool, view: Option<String>) -> Result<(), String> {
+    let data = payload(&state, id, as_text, view.as_deref().unwrap_or("raw"))?;
+    tauri::async_runtime::spawn_blocking(move || write_payload(&data))
+        .await
+        .map_err(|_| "复制被中断".to_string())?
 }
 
 #[tauri::command]
-pub fn paste_clip(
+pub async fn paste_clip(
     app: AppHandle,
     state: State<'_, Mutex<AppState>>,
     id: i64,
     as_text: bool,
     view: Option<String>,
 ) -> Result<(), String> {
-    let payload = payload(&state, id, as_text, view.as_deref().unwrap_or("raw"))?;
+    let data = payload(&state, id, as_text, view.as_deref().unwrap_or("raw"))?;
     let hwnd = {
         let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
         guard.previous_hwnd
     };
+    let ours = is_our_process(hwnd);
+    tauri::async_runtime::spawn_blocking(move || {
+        write_payload(&data)?;
+        if hwnd == 0 || ours {
+            return Err("已复制，请手动粘贴".into());
+        }
+        crate::panel::hide(&app);
+        send_to_window(hwnd)
+    })
+    .await
+    .map_err(|_| "粘贴被中断".to_string())?
+}
 
-    write_payload(&payload)?;
-    crate::panel::hide(&app);
-
+fn is_our_process(hwnd: isize) -> bool {
     if hwnd == 0 {
-        return Err("已复制，请手动粘贴".into());
+        return false;
     }
-    send_to_window(hwnd)
+    unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(HWND(hwnd as *mut std::ffi::c_void), Some(&mut pid));
+        pid != 0 && pid == std::process::id()
+    }
 }
 
 fn send_to_window(hwnd: isize) -> Result<(), String> {
