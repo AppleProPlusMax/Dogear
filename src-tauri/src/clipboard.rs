@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use windows::core::w;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HGLOBAL};
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, DeleteDC, GetDIBits, GetObjectW, BITMAP, BITMAPINFO, BITMAPINFOHEADER,
-    BI_RGB, DIB_RGB_COLORS, HBITMAP, HGDIOBJ,
+    CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HGDIOBJ,
 };
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardOwner, IsClipboardFormatAvailable,
@@ -18,7 +18,9 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CopyImage, GetForegroundWindow, GetWindowThreadProcessId, IMAGE_BITMAP,
+};
 
 const CF_UNICODETEXT: u32 = 13;
 const CF_BITMAP: u32 = 2;
@@ -212,9 +214,9 @@ pub fn read() -> ClipboardRead {
         if OpenClipboard(None).is_err() {
             return ClipboardRead::Empty;
         }
-        let outcome = read_image();
+        let grabbed = grab_image();
         let _ = CloseClipboard();
-        outcome
+        finish_grab(grabbed)
     }
 }
 
@@ -377,17 +379,21 @@ unsafe fn image_format_present() -> bool {
         || IsClipboardFormatAvailable(CF_BITMAP).is_ok()
 }
 
-unsafe fn read_image() -> ClipboardRead {
+enum ImageGrab {
+    Done(ClipboardRead),
+    OwnedBitmap(HBITMAP),
+}
+
+unsafe fn grab_image() -> ImageGrab {
     let png_format = RegisterClipboardFormatW(w!("PNG"));
     if png_format != 0 && IsClipboardFormatAvailable(png_format).is_ok() {
         if let Some(bytes) = read_global(png_format) {
             if bytes.starts_with(b"\x89PNG") {
                 let hash = crate::images::hash(&bytes);
-                return ClipboardRead::Image(ImageData { png: bytes, hash });
+                return ImageGrab::Done(ClipboardRead::Image(ImageData { png: bytes, hash }));
             }
         }
     }
-    // 直接拷贝 DIB 字节。拿着剪切板调用 GetDIBits 会和界面线程互相卡住。
     for format in [CF_DIBV5, CF_DIB] {
         if IsClipboardFormatAvailable(format).is_err() {
             continue;
@@ -396,15 +402,33 @@ unsafe fn read_image() -> ClipboardRead {
             continue;
         };
         if let Some((width, height, bgra)) = decode_dib(&bytes) {
-            return image_from_bgra(width, height, &bgra);
+            return ImageGrab::Done(image_from_bgra(width, height, &bgra));
         }
     }
-    match read_bitmap() {
-        Ok(Some((width, height, bgra))) => image_from_bgra(width, height, &bgra),
-        Ok(None) => ClipboardRead::Ignored,
+    match duplicate_clipboard_bitmap() {
+        Ok(Some(bitmap)) => ImageGrab::OwnedBitmap(bitmap),
+        Ok(None) => ImageGrab::Done(ClipboardRead::Ignored),
         Err(err) => {
             eprintln!("剪切板图片读取失败: {err}");
-            ClipboardRead::Empty
+            ImageGrab::Done(ClipboardRead::Empty)
+        }
+    }
+}
+
+unsafe fn finish_grab(grab: ImageGrab) -> ClipboardRead {
+    match grab {
+        ImageGrab::Done(read) => read,
+        ImageGrab::OwnedBitmap(bitmap) => {
+            let outcome = match pixels_from_bitmap(bitmap) {
+                Ok(Some((width, height, bgra))) => image_from_bgra(width, height, &bgra),
+                Ok(None) => ClipboardRead::Ignored,
+                Err(err) => {
+                    eprintln!("剪切板图片读取失败: {err}");
+                    ClipboardRead::Empty
+                }
+            };
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            outcome
         }
     }
 }
@@ -481,12 +505,40 @@ fn decode_dib(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     Some((width_u, abs_height, bgra))
 }
 
-unsafe fn read_bitmap() -> Result<Option<(u32, u32, Vec<u8>)>, String> {
+unsafe fn duplicate_clipboard_bitmap() -> Result<Option<HBITMAP>, String> {
     let handle = GetClipboardData(CF_BITMAP).map_err(|err| err.to_string())?;
     if handle.is_invalid() {
         return Err("剪切板没有位图".into());
     }
     let bitmap = HBITMAP(handle.0);
+    let mut info = BITMAP::default();
+    let read = GetObjectW(
+        HGDIOBJ(bitmap.0),
+        std::mem::size_of::<BITMAP>() as i32,
+        Some(&mut info as *mut _ as *mut _),
+    );
+    if read == 0 || info.bmWidth <= 0 || info.bmHeight == 0 {
+        return Err("无法读取位图尺寸".into());
+    }
+    if i64::from(info.bmWidth) * i64::from(info.bmHeight.abs()) > MAX_PIXELS {
+        return Ok(None);
+    }
+    // 先复制出自己的位图再关剪切板。拿着剪切板调用 GetDIBits 会卡住。
+    let copied = CopyImage(
+        HANDLE(bitmap.0),
+        IMAGE_BITMAP,
+        info.bmWidth,
+        info.bmHeight.abs(),
+        windows::Win32::UI::WindowsAndMessaging::IMAGE_FLAGS(0x00002000),
+    )
+    .map_err(|err| err.to_string())?;
+    if copied.is_invalid() {
+        return Err("无法复制剪切板位图".into());
+    }
+    Ok(Some(HBITMAP(copied.0)))
+}
+
+unsafe fn pixels_from_bitmap(bitmap: HBITMAP) -> Result<Option<(u32, u32, Vec<u8>)>, String> {
     let mut info = BITMAP::default();
     let read = GetObjectW(
         HGDIOBJ(bitmap.0),
@@ -506,7 +558,7 @@ unsafe fn read_bitmap() -> Result<Option<(u32, u32, Vec<u8>)>, String> {
         bmiHeader: BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
             biWidth: width,
-            biHeight: -height, // 负数表示自上而下，和 PNG 的行序一致
+            biHeight: -height,
             biPlanes: 1,
             biBitCount: 32,
             biCompression: BI_RGB.0,
@@ -533,8 +585,6 @@ unsafe fn read_bitmap() -> Result<Option<(u32, u32, Vec<u8>)>, String> {
     if lines == 0 {
         return Err("GetDIBits 返回 0 行".into());
     }
-
-    // 来自 DIB 的 alpha 常常是 0，直接用会得到一张全透明图，所以统一按不透明处理。
     for pixel in pixels.chunks_exact_mut(4) {
         pixel[3] = 255;
     }

@@ -64,6 +64,7 @@ const selected = ref(0);
 const notice = ref("");
 let noticeTimer = 0;
 let suppressNoticeClear = false;
+let pasting = false;
 
 function showNotice(message: string) {
   notice.value = message;
@@ -297,12 +298,15 @@ function focusSearch() {
 
 async function pasteSelected(asText = false) {
   const clip = current.value;
-  if (!clip) return;
+  if (!clip || pasting) return;
+  pasting = true;
   clearNotice();
   try {
     await pasteClip(clip.id, asText, clipView(clip));
   } catch (err) {
     showNotice(err instanceof Error ? err.message : String(err));
+  } finally {
+    pasting = false;
   }
 }
 

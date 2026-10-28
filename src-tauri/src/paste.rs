@@ -8,16 +8,25 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
-    VK_CONTROL,
+    keybd_event, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+    VIRTUAL_KEY, VK_CONTROL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
-    ShowWindow, SW_SHOW, SW_SHOWNORMAL,
+    BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsWindow, SetForegroundWindow,
+    ShowWindow, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
 };
 
 use crate::clipboard;
 use crate::state::AppState;
+
+/// 同一次只允许一个复制或粘贴去动剪切板和键盘，避免两下叠在一起卡住。
+static CLIPBOARD_ACTION: Mutex<()> = Mutex::new(());
+
+fn try_clipboard_action() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    CLIPBOARD_ACTION
+        .try_lock()
+        .map_err(|_| "上一次复制或粘贴还没结束".to_string())
+}
 
 /// 图片条目放原图，其余放原文。`as_text` 为真时图片放识别出的文字。
 enum Payload {
@@ -147,9 +156,12 @@ pub fn preview_code(state: State<'_, Mutex<AppState>>, id: i64, view: String) ->
 #[tauri::command]
 pub async fn copy_clip(state: State<'_, Mutex<AppState>>, id: i64, as_text: bool, view: Option<String>) -> Result<(), String> {
     let data = payload(&state, id, as_text, view.as_deref().unwrap_or("raw"))?;
-    tauri::async_runtime::spawn_blocking(move || write_payload(&data))
-        .await
-        .map_err(|_| "复制被中断".to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let _gate = try_clipboard_action()?;
+        write_payload(&data)
+    })
+    .await
+    .map_err(|_| "复制被中断".to_string())?
 }
 
 #[tauri::command]
@@ -165,45 +177,61 @@ pub async fn paste_clip(
         let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
         guard.previous_hwnd
     };
-    let ours = is_our_process(hwnd);
-    tauri::async_runtime::spawn_blocking(move || {
-        write_payload(&data)?;
-        if hwnd == 0 || ours {
-            return Err("已复制，请手动粘贴".into());
-        }
-        crate::panel::hide(&app);
-        send_to_window(hwnd)
-    })
-    .await
-    .map_err(|_| "粘贴被中断".to_string())?
+    tauri::async_runtime::spawn_blocking(move || paste_into(app, data, hwnd))
+        .await
+        .map_err(|_| "粘贴被中断".to_string())?
 }
 
-fn is_our_process(hwnd: isize) -> bool {
+fn paste_into(app: AppHandle, data: Payload, hwnd: isize) -> Result<(), String> {
+    let _gate = try_clipboard_action()?;
+    write_payload(&data)?;
+    if !can_auto_paste(hwnd, target_pid(hwnd), std::process::id(), window_exists(hwnd)) {
+        return Err("已复制，请手动粘贴".into());
+    }
+    crate::panel::hide(&app);
+    thread::sleep(Duration::from_millis(40));
+    let target = HWND(hwnd as *mut std::ffi::c_void);
+    if !unsafe { focus_for_paste(target) } {
+        crate::panel::open(&app);
+        return Err("已复制，请手动粘贴".into());
+    }
+    unsafe { send_ctrl_v() }.map_err(|err| format!("已复制，请手动粘贴（{err}）"))
+}
+
+fn can_auto_paste(hwnd: isize, target_pid: u32, our_pid: u32, window_exists: bool) -> bool {
+    hwnd != 0 && window_exists && target_pid != 0 && target_pid != our_pid
+}
+
+fn window_exists(hwnd: isize) -> bool {
+    hwnd != 0 && unsafe { IsWindow(Some(HWND(hwnd as *mut std::ffi::c_void))).as_bool() }
+}
+
+fn target_pid(hwnd: isize) -> u32 {
     if hwnd == 0 {
-        return false;
+        return 0;
     }
     unsafe {
         let mut pid = 0u32;
         GetWindowThreadProcessId(HWND(hwnd as *mut std::ffi::c_void), Some(&mut pid));
-        pid != 0 && pid == std::process::id()
+        pid
     }
 }
 
-fn send_to_window(hwnd: isize) -> Result<(), String> {
-    let target = HWND(hwnd as *mut std::ffi::c_void);
-    unsafe {
-        focus_window(target);
-        thread::sleep(Duration::from_millis(60));
-        if GetForegroundWindow() != target {
-            focus_window(target);
-            thread::sleep(Duration::from_millis(40));
-        }
-        if GetForegroundWindow() != target {
-            return Err("已复制，请手动粘贴".into());
-        }
-        send_ctrl_v().map_err(|err| format!("已复制，请手动粘贴（{err}）"))?;
+/// 切到目标窗口。不用 AttachThreadInput：那会和界面线程的消息循环卡在一起。
+unsafe fn focus_for_paste(target: HWND) -> bool {
+    let _ = ShowWindow(target, SW_RESTORE);
+    // 先松开一次 Alt，系统才允许后台线程把别的窗口带到前面。
+    keybd_event(0x12, 0, Default::default(), 0);
+    keybd_event(0x12, 0, KEYEVENTF_KEYUP, 0);
+    let _ = SetForegroundWindow(target);
+    let _ = BringWindowToTop(target);
+    thread::sleep(Duration::from_millis(40));
+    if GetForegroundWindow() == target {
+        return true;
     }
-    Ok(())
+    let _ = SetForegroundWindow(target);
+    thread::sleep(Duration::from_millis(40));
+    GetForegroundWindow() == target
 }
 
 pub(crate) unsafe fn focus_window(target: HWND) {
@@ -255,5 +283,18 @@ fn key_input(vk: u16, flags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_
                 dwExtraInfo: 0,
             },
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::can_auto_paste;
+
+    #[test]
+    fn paste_skips_missing_and_own_windows() {
+        assert!(!can_auto_paste(0, 10, 20, true));
+        assert!(!can_auto_paste(5, 20, 20, true));
+        assert!(!can_auto_paste(5, 10, 20, false));
+        assert!(can_auto_paste(5, 10, 20, true));
     }
 }
