@@ -30,7 +30,7 @@ import {
   type OcrUpdate,
 } from "./api";
 
-type FilterId = "all" | "text" | "link" | "image" | "code";
+type FilterId = "all" | "kept" | "text" | "link" | "image" | "code";
 
 type CodeView = "pretty" | "compact" | "raw";
 
@@ -46,6 +46,7 @@ const filters = computed(() => [
   { id: "link" as const, label: t("kindLink") },
   { id: "image" as const, label: t("kindImage") },
   { id: "code" as const, label: t("kindCode") },
+  { id: "kept" as const, label: t("kindKept") },
 ]);
 
 const settingsStore = useSettingsStore();
@@ -147,11 +148,13 @@ const searched = computed(() => {
 
 function countOf(id: FilterId) {
   if (id === "all") return searched.value.length;
+  if (id === "kept") return searched.value.filter((clip) => clip.pinned).length;
   return searched.value.filter((clip) => clip.kind === id).length;
 }
 
 const filtered = computed(() => {
   if (filter.value === "all") return searched.value;
+  if (filter.value === "kept") return searched.value.filter((clip) => clip.pinned);
   return searched.value.filter((clip) => clip.kind === filter.value);
 });
 
@@ -314,6 +317,9 @@ async function toggleFavorite() {
   clip.pinned = !previous;
   try {
     clip.pinned = await toggleClipPin(clip.id);
+    if (filter.value === "kept" && !clip.pinned && selected.value >= filtered.value.length) {
+      selected.value = Math.max(0, filtered.value.length - 1);
+    }
   } catch (err) {
     clip.pinned = previous;
     notice.value = err instanceof Error ? err.message : String(err);
