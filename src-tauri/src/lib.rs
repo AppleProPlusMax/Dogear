@@ -57,7 +57,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
+            Some(vec!["--autostart"]),
         ))
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             panel::open(app);
@@ -123,9 +123,6 @@ pub fn run() {
             }));
             settings::sync_launch(app.handle(), loaded.launch_at_login);
             panel::apply_auto_hide(app.handle(), loaded.auto_hide);
-            if !loaded.guide_seen {
-                panel::open(app.handle());
-            }
 
             let blur_handle = app.handle().clone();
             window.on_window_event(move |event| match event {
@@ -189,6 +186,9 @@ pub fn run() {
                 ocr::enqueue(id);
             }
             watcher::start(app.handle().clone());
+            if should_present_on_launch(&std::env::args().collect::<Vec<_>>(), loaded.guide_seen) {
+                panel::open(app.handle());
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -227,5 +227,27 @@ fn reveal_window(app: &tauri::AppHandle) {
         let _ = window.show();
         let _ = window.set_focus();
         panel::nudge_surface(&window);
+    }
+}
+
+/// 快捷方式、开始菜单打开时显示窗口。开机自启带 `--autostart`，只进托盘。
+/// 第一次使用即使是开机自启也要打开，否则教程出不来。
+fn should_present_on_launch(args: &[String], guide_seen: bool) -> bool {
+    let from_login = args.iter().any(|arg| arg == "--autostart");
+    !from_login || !guide_seen
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_present_on_launch;
+
+    #[test]
+    fn shortcut_opens_the_window_and_login_stays_in_the_tray() {
+        let shortcut = vec!["dogear.exe".into()];
+        let login = vec!["dogear.exe".into(), "--autostart".into()];
+        assert!(should_present_on_launch(&shortcut, true));
+        assert!(should_present_on_launch(&shortcut, false));
+        assert!(!should_present_on_launch(&login, true));
+        assert!(should_present_on_launch(&login, false));
     }
 }

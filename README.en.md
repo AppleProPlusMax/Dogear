@@ -28,7 +28,7 @@ The packages are not code-signed. If Windows shows a warning, choose to run it a
 
 ## Use
 
-The window stays hidden at startup. The icon sits in the tray. Minimize sends it to the taskbar, and close sends it to the tray. To quit, right-click the tray icon and choose Quit.
+Opening it from a shortcut or the Start menu shows the window. Starting with Windows only puts the icon in the tray. Minimize sends it to the taskbar, and close sends it to the tray. To quit, right-click the tray icon and choose Quit.
 
 | Action | Default |
 | --- | --- |
