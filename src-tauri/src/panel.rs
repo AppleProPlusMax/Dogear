@@ -18,9 +18,24 @@ use crate::state::{self, AppState};
 
 static ESCAPE_WANTED: AtomicBool = AtomicBool::new(false);
 static VIEWER_OPEN: AtomicBool = AtomicBool::new(false);
+static SEARCH_NONEMPTY: AtomicBool = AtomicBool::new(false);
 
 pub fn set_viewer_open(open: bool) {
     VIEWER_OPEN.store(open, Ordering::SeqCst);
+}
+
+#[tauri::command]
+pub fn set_search_nonempty(value: bool) {
+    SEARCH_NONEMPTY.store(value, Ordering::SeqCst);
+}
+
+/// 搜索框有内容时，Esc 先清空搜索词，不收起窗口。
+pub fn clear_search_if_nonempty(app: &AppHandle) -> bool {
+    if !SEARCH_NONEMPTY.swap(false, Ordering::SeqCst) {
+        return false;
+    }
+    let _ = app.emit("clear-search", ());
+    true
 }
 
 /// 图片查看层开着时，Esc 先关掉它，不收起窗口。
@@ -122,6 +137,7 @@ pub fn apply_auto_hide(app: &AppHandle, auto_hide: bool) {
 
 pub fn hide(app: &AppHandle) {
     let _ = close_viewer_if_open(app);
+    set_search_nonempty(false);
     set_escape(app, false);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();

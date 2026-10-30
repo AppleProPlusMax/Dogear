@@ -22,6 +22,7 @@ import {
   getEffectState,
   hidePanel,
   setImageViewer,
+  setSearchNonempty,
   listClips,
   startCapture,
   pasteClip,
@@ -514,10 +515,23 @@ function onViewerPointerUp(event: PointerEvent) {
   }, 0);
 }
 
+function cycleFilter(backward: boolean) {
+  const ids = filters.value.map((item) => item.id);
+  const index = Math.max(0, ids.indexOf(filter.value));
+  const step = backward ? -1 : 1;
+  filter.value = ids[(index + step + ids.length) % ids.length];
+  selected.value = 0;
+}
+
 function onKeydown(event: KeyboardEvent) {
   if (imageOpen.value) {
     if (event.key === "Escape") closeImage();
     event.preventDefault();
+    return;
+  }
+  if (event.key === "Tab" && !event.ctrlKey && !event.altKey && !event.metaKey && !settingsStore.guideOpen) {
+    event.preventDefault();
+    cycleFilter(event.shiftKey);
     return;
   }
   if (event.key === "ArrowDown") {
@@ -583,6 +597,12 @@ function onEscape(event: KeyboardEvent) {
     return;
   }
   if (settingsStore.capturing || settingsStore.guideOpen) return;
+  if (view.value === "history" && query.value.length > 0) {
+    event.preventDefault();
+    event.stopPropagation();
+    query.value = "";
+    return;
+  }
   if (!("__TAURI_INTERNALS__" in window)) return;
   event.preventDefault();
   event.stopPropagation();
@@ -711,6 +731,15 @@ async function copyColor(rgb: string) {
   }
 }
 
+watch(query, (value) => {
+  if (view.value !== "history") return;
+  void setSearchNonempty(value.length > 0);
+});
+
+watch(view, (next) => {
+  void setSearchNonempty(next === "history" && query.value.length > 0);
+});
+
 watch(selected, () => {
   if (!suppressNoticeClear) clearNotice();
   void loadFullImage();
@@ -760,6 +789,9 @@ onMounted(async () => {
     }),
     await listen("close-image-viewer", () => {
       closeImage();
+    }),
+    await listen("clear-search", () => {
+      query.value = "";
     }),
     await listen<{ effect: string }>("effect-changed", (event) => {
       document.documentElement.dataset.effect = event.payload.effect;

@@ -66,6 +66,7 @@ pub fn run() {
             panel::list_clips,
             panel::hide_panel,
             panel::set_image_viewer,
+            panel::set_search_nonempty,
             panel::minimize_panel,
             panel::arm_window_drag,
             panel::clip_image,

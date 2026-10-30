@@ -236,6 +236,9 @@ pub fn on_global_shortcut(app: &AppHandle, shortcut: &Shortcut) {
         if panel::close_viewer_if_open(app) {
             return;
         }
+        if panel::clear_search_if_nonempty(app) {
+            return;
+        }
         panel::hide(app);
         return;
     }
