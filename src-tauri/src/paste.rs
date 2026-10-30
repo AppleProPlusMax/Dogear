@@ -6,14 +6,13 @@ use tauri::{AppHandle, State};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Shell::ShellExecuteW;
-use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     keybd_event, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
     VIRTUAL_KEY, VK_CONTROL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsWindow, SetForegroundWindow,
-    ShowWindow, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
+    BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow,
+    SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
 };
 
 use crate::clipboard;
@@ -192,7 +191,7 @@ fn paste_into(app: AppHandle, data: Payload, hwnd: isize) -> Result<(), String> 
     thread::sleep(Duration::from_millis(40));
     let target = HWND(hwnd as *mut std::ffi::c_void);
     if !unsafe { focus_for_paste(target) } {
-        crate::panel::open(&app);
+        crate::panel::reveal_after_failed_paste(&app);
         return Err("已复制，请手动粘贴".into());
     }
     unsafe { send_ctrl_v() }.map_err(|err| format!("已复制，请手动粘贴（{err}）"))
@@ -219,10 +218,13 @@ fn target_pid(hwnd: isize) -> u32 {
 
 /// 切到目标窗口。不用 AttachThreadInput：那会和界面线程的消息循环卡在一起。
 unsafe fn focus_for_paste(target: HWND) -> bool {
-    let _ = ShowWindow(target, SW_RESTORE);
-    // 先松开一次 Alt，系统才允许后台线程把别的窗口带到前面。
-    keybd_event(0x12, 0, Default::default(), 0);
-    keybd_event(0x12, 0, KEYEVENTF_KEYUP, 0);
+    let show = show_command(IsIconic(target).as_bool());
+    let _ = ShowWindow(target, show);
+    // 只松开 Alt，不按下。按下一整下会打开目标程序的菜单。
+    for tap in foreground_unlock_taps() {
+        let flags = if tap.key_up { KEYEVENTF_KEYUP } else { Default::default() };
+        keybd_event(tap.vk, 0, flags, 0);
+    }
     let _ = SetForegroundWindow(target);
     let _ = BringWindowToTop(target);
     thread::sleep(Duration::from_millis(40));
@@ -234,26 +236,29 @@ unsafe fn focus_for_paste(target: HWND) -> bool {
     GetForegroundWindow() == target
 }
 
+fn show_command(is_minimized: bool) -> windows::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD {
+    if is_minimized { SW_RESTORE } else { SW_SHOW }
+}
+
+struct KeyTap {
+    vk: u8,
+    key_up: bool,
+}
+
+fn foreground_unlock_taps() -> &'static [KeyTap] {
+    &[KeyTap { vk: 0x12, key_up: true }]
+}
+
 pub(crate) unsafe fn focus_window(target: HWND) {
-    let foreground = GetForegroundWindow();
-    let current = GetCurrentThreadId();
-    let foreground_thread = GetWindowThreadProcessId(foreground, None);
-    let target_thread = GetWindowThreadProcessId(target, None);
-    let attached_foreground = foreground_thread != 0
-        && foreground_thread != current
-        && AttachThreadInput(current, foreground_thread, true).0 != 0;
-    let attached_target = target_thread != 0
-        && target_thread != current
-        && AttachThreadInput(current, target_thread, true).0 != 0;
-    let _ = ShowWindow(target, SW_SHOW);
+    // 和粘贴切焦点同一条路：只显示、只松开 Alt，不把输入线程绑在一起。
+    let show = show_command(IsIconic(target).as_bool());
+    let _ = ShowWindow(target, show);
+    for tap in foreground_unlock_taps() {
+        let flags = if tap.key_up { KEYEVENTF_KEYUP } else { Default::default() };
+        keybd_event(tap.vk, 0, flags, 0);
+    }
     let _ = SetForegroundWindow(target);
     let _ = BringWindowToTop(target);
-    if attached_target {
-        let _ = AttachThreadInput(current, target_thread, false);
-    }
-    if attached_foreground {
-        let _ = AttachThreadInput(current, foreground_thread, false);
-    }
 }
 
 unsafe fn send_ctrl_v() -> Result<(), String> {
@@ -288,7 +293,8 @@ fn key_input(vk: u16, flags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_
 
 #[cfg(test)]
 mod tests {
-    use super::can_auto_paste;
+    use super::{can_auto_paste, foreground_unlock_taps, show_command};
+    use super::{SW_RESTORE, SW_SHOW};
 
     #[test]
     fn paste_skips_missing_and_own_windows() {
@@ -296,5 +302,14 @@ mod tests {
         assert!(!can_auto_paste(5, 20, 20, true));
         assert!(!can_auto_paste(5, 10, 20, false));
         assert!(can_auto_paste(5, 10, 20, true));
+    }
+
+    #[test]
+    fn maximized_windows_stay_maximized_and_alt_is_only_released() {
+        assert_eq!(show_command(false), SW_SHOW);
+        assert_eq!(show_command(true), SW_RESTORE);
+        let taps = foreground_unlock_taps();
+        assert!(taps.iter().all(|tap| tap.key_up));
+        assert!(taps.iter().any(|tap| tap.vk == 0x12));
     }
 }

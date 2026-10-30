@@ -4,8 +4,9 @@ use std::thread;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
+use winreg::enums::HKEY_CURRENT_USER;
+use winreg::RegKey;
 
 use crate::capture;
 use crate::panel;
@@ -555,13 +556,53 @@ fn unregister_user_shortcuts(app: &AppHandle, settings: &Settings) -> Result<(),
 }
 
 fn apply_launch(app: &AppHandle, enabled: bool) -> Result<(), String> {
-    let autostart = app.autolaunch();
-    let result = if enabled {
-        autostart.enable()
-    } else {
-        autostart.disable()
-    };
-    result.map_err(|err| format!("开机自启设置失败: {err}"))
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (key, _) = hkcu
+        .create_subkey(AUTOSTART_RUN_KEY)
+        .map_err(|err| format!("开机自启设置失败: {err}"))?;
+    let names = autostart_value_names(&app.package_info().name);
+    if enabled {
+        let exe = std::env::current_exe().map_err(|err| format!("无法定位程序: {err}"))?;
+        let command = autostart_command(&exe.display().to_string());
+        key.set_value(&names.write, &command)
+            .map_err(|err| format!("开机自启设置失败: {err}"))?;
+    } else if let Err(err) = key.delete_value(&names.write) {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!("开机自启设置失败: {err}"));
+        }
+    }
+    for name in names.remove {
+        if let Err(err) = key.delete_value(name) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!("开机自启设置失败: {err}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+const AUTOSTART_RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+
+struct AutostartNames {
+    write: String,
+    remove: Vec<&'static str>,
+}
+
+/// 写入名和插件用的产品名一致。大小写不同的旧名字在 Windows 上是同一项，不能写完再删。
+fn autostart_value_names(primary: &str) -> AutostartNames {
+    let remove = ["dogear", "Dogear"]
+        .into_iter()
+        .filter(|name| !name.eq_ignore_ascii_case(primary))
+        .collect();
+    AutostartNames {
+        write: primary.to_string(),
+        remove,
+    }
+}
+
+/// 路径加引号，再带 `--autostart`。否则 `C:\Program Files\...` 会被空格拆开，开机起不来。
+pub(crate) fn autostart_command(exe: &str) -> String {
+    format!("\"{exe}\" --autostart")
 }
 
 fn reapply_effect(app: &AppHandle, reduce_transparency: bool) -> Result<(), String> {
@@ -594,7 +635,10 @@ fn settings_path() -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_ignored_app, merge, normalize_ignored, normalize_loaded, normalize_shortcut, Settings, SettingsPatch};
+    use super::{
+        autostart_command, autostart_value_names, is_ignored_app, merge, normalize_ignored, normalize_loaded, normalize_shortcut,
+        Settings, SettingsPatch,
+    };
 
     #[test]
     fn normalizes_modifier_order_and_case() {
@@ -679,5 +723,25 @@ mod tests {
         let mut loaded = Settings::default();
         loaded.history_limit = 0;
         assert_eq!(normalize_loaded(loaded).history_limit, 200);
+    }
+
+    #[test]
+    fn autostart_command_quotes_paths_that_contain_spaces() {
+        let command = autostart_command(r"C:\Program Files\Dogear\dogear.exe");
+        assert_eq!(command, r#""C:\Program Files\Dogear\dogear.exe" --autostart"#);
+        assert!(command.starts_with('"'));
+        assert!(command.contains("--autostart"));
+        assert!(!command.starts_with(r"C:\Program "));
+    }
+
+    #[test]
+    fn autostart_name_matches_the_product_and_does_not_delete_itself() {
+        let dogear = autostart_value_names("dogear");
+        assert_eq!(dogear.write, "dogear");
+        assert!(dogear.remove.iter().all(|name| !name.eq_ignore_ascii_case("dogear")));
+
+        let product = autostart_value_names("Dogear");
+        assert_eq!(product.write, "Dogear");
+        assert!(product.remove.iter().all(|name| !name.eq_ignore_ascii_case("Dogear")));
     }
 }

@@ -114,6 +114,23 @@ pub fn hide(app: &AppHandle) {
     crate::settings::abort_shortcut_capture(app);
 }
 
+/// 粘贴没切到目标窗口时把面板叫回来。不绑定输入线程，也不重置搜索。
+pub fn reveal_after_failed_paste(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if let Some(state) = app.try_state::<Mutex<AppState>>() {
+        if let Ok(mut guard) = state.lock() {
+            guard.ignore_blur_until = state::now_ms() + 800;
+        }
+    }
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+    nudge_surface(&window);
+    set_escape(app, true);
+}
+
 pub fn open_settings(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
@@ -390,24 +407,49 @@ pub fn delete_clip(app: AppHandle, state: State<'_, Mutex<AppState>>, id: i64) -
 }
 
 #[tauri::command]
-pub fn clear_clips(app: AppHandle, state: State<'_, Mutex<AppState>>) -> Result<(), String> {
-    let mut guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
-    let mut removed = Vec::new();
-    guard.clips.retain(|clip| {
-        if clip.pinned {
-            true
-        } else {
-            removed.push(clip.clone());
+pub async fn clear_clips(app: AppHandle, state: State<'_, Mutex<AppState>>) -> Result<(), String> {
+    let (removed_ids, hashes) = {
+        let mut guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+        let mut removed_ids = Vec::new();
+        let mut removed_hashes = Vec::new();
+        guard.clips.retain(|clip| {
+            if clip.pinned {
+                return true;
+            }
+            removed_ids.push(clip.id);
+            if clip.kind == "image" {
+                if let Some(hash) = clip.hash.clone() {
+                    removed_hashes.push(hash);
+                }
+            }
             false
-        }
-    });
-    let removed_ids: Vec<i64> = removed.iter().map(|clip| clip.id).collect();
-    let hashes = unused_image_hashes(&guard.clips, &removed);
-    drop(guard);
-    crate::storage::delete_saved(&removed_ids);
-    crate::images::remove_hashes(&app, &hashes);
+        });
+        let hashes = unused_hash_list(&guard.clips, &removed_hashes);
+        (removed_ids, hashes)
+    };
+    let app_for_files = app.clone();
+    let ids_for_db = removed_ids.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::storage::delete_saved(&ids_for_db);
+        crate::images::remove_hashes(&app_for_files, &hashes);
+    })
+    .await
+    .map_err(|_| "清空历史被中断".to_string())?;
     notify_pruned(&app, removed_ids);
     Ok(())
+}
+
+fn unused_hash_list(kept: &[crate::state::Clip], removed: &[String]) -> Vec<String> {
+    let mut hashes = Vec::new();
+    for hash in removed {
+        let still_used = kept.iter().any(|item| {
+            item.kind == "image" && item.hash.as_deref() == Some(hash.as_str())
+        });
+        if !still_used && !hashes.iter().any(|item| item == hash) {
+            hashes.push(hash.clone());
+        }
+    }
+    hashes
 }
 
 pub(crate) fn notify_pruned(app: &AppHandle, removed_ids: Vec<i64>) {

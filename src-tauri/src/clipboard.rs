@@ -381,6 +381,8 @@ unsafe fn image_format_present() -> bool {
 
 enum ImageGrab {
     Done(ClipboardRead),
+    /// 像素先拿走，等剪切板关掉后再编码，避免大图占着剪切板。
+    Pixels { width: u32, height: u32, bgra: Vec<u8> },
     OwnedBitmap(HBITMAP),
 }
 
@@ -402,7 +404,7 @@ unsafe fn grab_image() -> ImageGrab {
             continue;
         };
         if let Some((width, height, bgra)) = decode_dib(&bytes) {
-            return ImageGrab::Done(image_from_bgra(width, height, &bgra));
+            return ImageGrab::Pixels { width, height, bgra };
         }
     }
     match duplicate_clipboard_bitmap() {
@@ -418,6 +420,7 @@ unsafe fn grab_image() -> ImageGrab {
 unsafe fn finish_grab(grab: ImageGrab) -> ClipboardRead {
     match grab {
         ImageGrab::Done(read) => read,
+        ImageGrab::Pixels { width, height, bgra } => image_from_bgra(width, height, &bgra),
         ImageGrab::OwnedBitmap(bitmap) => {
             let outcome = match pixels_from_bitmap(bitmap) {
                 Ok(Some((width, height, bgra))) => image_from_bgra(width, height, &bgra),
