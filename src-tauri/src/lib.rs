@@ -65,6 +65,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             panel::list_clips,
             panel::hide_panel,
+            panel::set_image_viewer,
             panel::minimize_panel,
             panel::arm_window_drag,
             panel::clip_image,
@@ -79,6 +80,7 @@ pub fn run() {
             panel::toggle_clip_pin,
             panel::delete_clip,
             panel::clear_clips,
+            panel::storage_usage,
             capture::start_capture,
             get_effect_state,
             get_settings,

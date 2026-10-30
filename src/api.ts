@@ -100,12 +100,25 @@ export function retryOcr(id: number): Promise<void> {
   return invoke("retry_ocr", { id });
 }
 
+export interface StorageUsage {
+  total: number;
+  kept: number;
+}
+
+export function storageUsage(): Promise<StorageUsage> {
+  return invoke("storage_usage");
+}
+
 export function startCapture(): Promise<void> {
   return invoke("start_capture");
 }
 
 export function hidePanel(): Promise<void> {
   return invoke("hide_panel");
+}
+
+export function setImageViewer(open: boolean): Promise<void> {
+  return invoke("set_image_viewer", { open });
 }
 
 export function minimizePanel(): Promise<void> {

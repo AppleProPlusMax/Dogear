@@ -17,6 +17,20 @@ use crate::paste;
 use crate::state::{self, AppState};
 
 static ESCAPE_WANTED: AtomicBool = AtomicBool::new(false);
+static VIEWER_OPEN: AtomicBool = AtomicBool::new(false);
+
+pub fn set_viewer_open(open: bool) {
+    VIEWER_OPEN.store(open, Ordering::SeqCst);
+}
+
+/// 图片查看层开着时，Esc 先关掉它，不收起窗口。
+pub fn close_viewer_if_open(app: &AppHandle) -> bool {
+    if !VIEWER_OPEN.swap(false, Ordering::SeqCst) {
+        return false;
+    }
+    let _ = app.emit("close-image-viewer", ());
+    true
+}
 
 fn escape_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -107,6 +121,7 @@ pub fn apply_auto_hide(app: &AppHandle, auto_hide: bool) {
 }
 
 pub fn hide(app: &AppHandle) {
+    let _ = close_viewer_if_open(app);
     set_escape(app, false);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
@@ -259,6 +274,11 @@ pub fn apply_system_corners(window: &tauri::WebviewWindow) {
 }
 
 #[tauri::command]
+pub fn set_image_viewer(open: bool) {
+    set_viewer_open(open);
+}
+
+#[tauri::command]
 pub fn hide_panel(app: AppHandle) -> Result<(), String> {
     hide(&app);
     Ok(())
@@ -404,6 +424,37 @@ pub fn delete_clip(app: AppHandle, state: State<'_, Mutex<AppState>>, id: i64) -
     crate::storage::delete_saved(&[id]);
     crate::images::remove_hashes(&app, &hashes);
     Ok(())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageUsage {
+    pub total: u64,
+    pub kept: u64,
+}
+
+#[tauri::command]
+pub async fn storage_usage(app: AppHandle, state: State<'_, Mutex<AppState>>) -> Result<StorageUsage, String> {
+    let clips = {
+        let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+        guard
+            .clips
+            .iter()
+            .map(|clip| crate::images::Footprint {
+                pinned: clip.pinned,
+                hash: if clip.kind == "image" {
+                    clip.hash.clone()
+                } else {
+                    None
+                },
+                text_bytes: (clip.content.len() + clip.ocr_text.as_ref().map(String::len).unwrap_or(0)) as u64,
+            })
+            .collect::<Vec<_>>()
+    };
+    let (total, kept) = tauri::async_runtime::spawn_blocking(move || crate::images::usage(&app, &clips))
+        .await
+        .map_err(|_| "无法统计占用".to_string())?;
+    Ok(StorageUsage { total, kept })
 }
 
 #[tauri::command]

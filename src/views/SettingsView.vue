@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { getVersion } from "@tauri-apps/api/app";
-import { clearClips } from "../api";
+import { clearClips, storageUsage } from "../api";
 import { useSettingsStore, type ShortcutField } from "../stores/settings";
 import { useI18n, type AppLocale } from "../i18n";
 import WindowControls from "../components/WindowControls.vue";
@@ -13,7 +13,42 @@ const version = ref("");
 const ignoreDraft = ref("");
 const clearArmed = ref(false);
 const clearNote = ref("");
+const storageTotal = ref<number | null>(null);
+const storageKept = ref<number | null>(null);
 let clearTimer = 0;
+
+const storageText = computed(() => {
+  if (storageTotal.value === null || storageKept.value === null) return "";
+  return t("storageUse", {
+    total: formatBytes(storageTotal.value),
+    kept: formatBytes(storageKept.value),
+  });
+});
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let size = bytes / 1024;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  const digits = size >= 10 ? 0 : 1;
+  return `${size.toFixed(digits)} ${units[unit]}`;
+}
+
+async function loadStorage() {
+  if (!("__TAURI_INTERNALS__" in window)) return;
+  try {
+    const usage = await storageUsage();
+    storageTotal.value = usage.total;
+    storageKept.value = usage.kept;
+  } catch {
+    storageTotal.value = null;
+    storageKept.value = null;
+  }
+}
 
 const historySizes = [200, 500, 1000] as const;
 
@@ -64,6 +99,7 @@ async function clearKept() {
   try {
     await clearClips();
     clearNote.value = t("clearedKept");
+    await loadStorage();
   } catch (err) {
     clearNote.value = err instanceof Error ? err.message : String(err);
   }
@@ -150,6 +186,7 @@ onMounted(() => {
     void getVersion().then((value) => {
       version.value = value;
     });
+    void loadStorage();
   }
 });
 
@@ -345,6 +382,7 @@ onUnmounted(() => {
         <div class="row">
           <div>
             <div class="label">{{ t("clearKept") }}</div>
+            <p v-if="storageText">{{ storageText }}</p>
             <p>{{ clearNote || t("clearKeptHint") }}</p>
           </div>
           <button type="button" class="text danger" @click="clearKept()">

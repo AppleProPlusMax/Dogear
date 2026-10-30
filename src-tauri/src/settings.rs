@@ -233,6 +233,9 @@ pub fn on_global_shortcut(app: &AppHandle, shortcut: &Shortcut) {
             abort_shortcut_capture(app);
             return;
         }
+        if panel::close_viewer_if_open(app) {
+            return;
+        }
         panel::hide(app);
         return;
     }

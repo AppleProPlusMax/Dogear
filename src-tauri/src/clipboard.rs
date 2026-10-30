@@ -115,39 +115,55 @@ pub fn is_self_image(hash: &str) -> bool {
 
 /// 复制来源的进程名，例如 `Code.exe`。剪切板所有者优先，没有再看前台窗口。
 /// WebView2 的所有者是 `msedgewebview2.exe`，再往上找到宿主程序。
+/// `svchost.exe` 等系统宿主会占住剪切板，但不是用户正在复制的程序，这时改用前台窗口。
 pub fn source_exe() -> Option<String> {
     unsafe {
-        let owner = GetClipboardOwner().unwrap_or_default();
-        let hwnd = if owner.0.is_null() {
-            GetForegroundWindow()
-        } else {
-            owner
-        };
-        if hwnd.0.is_null() {
-            return None;
-        }
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        let mut name = process_exe(pid)?;
-        let mut current = pid;
-        for _ in 0..4 {
-            if !name.eq_ignore_ascii_case("msedgewebview2.exe") {
-                break;
-            }
-            let Some(parent) = parent_pid(current) else {
-                break;
-            };
-            let Some(parent_name) = process_exe(parent) else {
-                break;
-            };
-            current = parent;
-            name = parent_name;
-        }
-        if name.eq_ignore_ascii_case("dogear.exe") {
-            return None;
-        }
-        Some(name)
+        let owner = window_exe(GetClipboardOwner().unwrap_or_default());
+        let foreground = window_exe(GetForegroundWindow());
+        pick_source(owner.as_deref(), foreground.as_deref())
     }
+}
+
+/// 系统进程会成为剪切板所有者，却不是用户复制时所在的程序。
+fn is_system_broker(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "svchost.exe" | "runtimebroker.exe" | "dllhost.exe"
+    )
+}
+
+/// 所有者是普通程序时用它。所有者是系统宿主或空时，改用前台程序。
+fn pick_source(owner: Option<&str>, foreground: Option<&str>) -> Option<String> {
+    let usable = |name: &str| !is_system_broker(name) && !name.eq_ignore_ascii_case("dogear.exe");
+    match owner {
+        Some(name) if name.eq_ignore_ascii_case("dogear.exe") => None,
+        Some(name) if usable(name) => Some(name.to_string()),
+        _ => foreground.filter(|name| usable(name)).map(str::to_string),
+    }
+}
+
+unsafe fn window_exe(hwnd: windows::Win32::Foundation::HWND) -> Option<String> {
+    if hwnd.0.is_null() {
+        return None;
+    }
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    let mut name = process_exe(pid)?;
+    let mut current = pid;
+    for _ in 0..4 {
+        if !name.eq_ignore_ascii_case("msedgewebview2.exe") {
+            break;
+        }
+        let Some(parent) = parent_pid(current) else {
+            break;
+        };
+        let Some(parent_name) = process_exe(parent) else {
+            break;
+        };
+        current = parent;
+        name = parent_name;
+    }
+    Some(name)
 }
 
 unsafe fn process_exe(pid: u32) -> Option<String> {
@@ -645,7 +661,35 @@ unsafe fn read_unicode() -> ClipboardRead {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_dib;
+    use super::{decode_dib, pick_source};
+
+    #[test]
+    fn system_broker_is_not_the_copy_source() {
+        assert_eq!(
+            pick_source(Some("svchost.exe"), Some("Notepad.exe")).as_deref(),
+            Some("Notepad.exe")
+        );
+        assert_eq!(
+            pick_source(Some("RuntimeBroker.exe"), Some("Code.exe")).as_deref(),
+            Some("Code.exe")
+        );
+        assert_eq!(pick_source(Some("svchost.exe"), Some("svchost.exe")), None);
+        assert_eq!(pick_source(Some("svchost.exe"), Some("dogear.exe")), None);
+        assert_eq!(pick_source(Some("svchost.exe"), None), None);
+    }
+
+    #[test]
+    fn real_owner_wins_over_the_foreground_window() {
+        assert_eq!(
+            pick_source(Some("Code.exe"), Some("svchost.exe")).as_deref(),
+            Some("Code.exe")
+        );
+        assert_eq!(pick_source(Some("dogear.exe"), Some("Notepad.exe")), None);
+        assert_eq!(
+            pick_source(None, Some("explorer.exe")).as_deref(),
+            Some("explorer.exe")
+        );
+    }
 
     #[test]
     fn dib_pixels_are_read_without_gdi() {

@@ -21,6 +21,7 @@ import {
   type FoundColor,
   getEffectState,
   hidePanel,
+  setImageViewer,
   listClips,
   startCapture,
   pasteClip,
@@ -61,6 +62,18 @@ const clips = ref<Clip[]>([]);
 const query = ref("");
 const filter = ref<FilterId>("all");
 const selected = ref(0);
+const imageOpen = ref(false);
+const viewScale = ref(1);
+const viewX = ref(0);
+const viewY = ref(0);
+const viewerTransform = computed(() => ({
+  transform: `translate(${viewX.value}px, ${viewY.value}px) scale(${viewScale.value})`,
+}));
+const viewScaleMin = 0.25;
+const viewScaleMax = 8;
+let viewDrag: { id: number; x: number; y: number; originX: number; originY: number; moved: boolean } | null = null;
+let ignoreViewerClick = false;
+let dismissGuard: { x: number; y: number; until: number } | null = null;
 const notice = ref("");
 let noticeTimer = 0;
 let suppressNoticeClear = false;
@@ -146,6 +159,15 @@ function itemTitle(clip: Clip) {
   return line;
 }
 
+/** 这些进程名是系统宿主，不是用户复制时所在的程序。旧记录里可能还存着它们。 */
+function shownSource(clip: Clip) {
+  const name = clip.sourceApp;
+  if (!settingsStore.settings.showSource || !name) return "";
+  const stem = name.toLowerCase();
+  if (stem === "svchost.exe" || stem === "runtimebroker.exe" || stem === "dllhost.exe") return "";
+  return name;
+}
+
 function itemSub(clip: Clip) {
   const body =
     clip.kind !== "image"
@@ -153,7 +175,8 @@ function itemSub(clip: Clip) {
       : ocrLabel(clip)
         ? t("imageMeta", { status: ocrLabel(clip) })
         : t("kindImage");
-  return settingsStore.settings.showSource && clip.sourceApp ? `${clip.sourceApp} · ${body}` : body;
+  const source = shownSource(clip);
+  return source ? `${source} · ${body}` : body;
 }
 
 const searched = computed(() => {
@@ -163,7 +186,7 @@ const searched = computed(() => {
     (clip) =>
       clip.content.toLowerCase().includes(q)
       || (clip.ocrText ?? "").toLowerCase().includes(q)
-      || (settingsStore.settings.showSource && (clip.sourceApp ?? "").toLowerCase().includes(q)),
+      || shownSource(clip).toLowerCase().includes(q),
   );
 });
 
@@ -388,7 +411,115 @@ async function recognizeSelected() {
   }
 }
 
+function resetViewer() {
+  viewScale.value = 1;
+  viewX.value = 0;
+  viewY.value = 0;
+  viewDrag = null;
+  ignoreViewerClick = false;
+}
+
+function openImage() {
+  if (settingsStore.guideOpen) return;
+  if (current.value?.kind !== "image" || !currentImage.value) return;
+  resetViewer();
+  imageOpen.value = true;
+  void setImageViewer(true);
+  void loadFullImage();
+}
+
+function closeImage(event?: Event) {
+  if (!imageOpen.value) return;
+  if (event instanceof MouseEvent) {
+    dismissGuard = { x: event.clientX, y: event.clientY, until: performance.now() + 500 };
+  }
+  imageOpen.value = false;
+  resetViewer();
+  void setImageViewer(false);
+}
+
+function swallowDismissFollowup(event: Event) {
+  if (!dismissGuard || performance.now() > dismissGuard.until) {
+    dismissGuard = null;
+    return;
+  }
+  if (!(event instanceof MouseEvent)) return;
+  const dx = event.clientX - dismissGuard.x;
+  const dy = event.clientY - dismissGuard.y;
+  if (dx * dx + dy * dy > 64) return;
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function onViewerBackdrop(event: MouseEvent) {
+  if (ignoreViewerClick) {
+    ignoreViewerClick = false;
+    return;
+  }
+  closeImage(event);
+}
+
+function onViewerWheel(event: WheelEvent) {
+  const frame = event.currentTarget;
+  if (!(frame instanceof HTMLElement)) return;
+  const rect = frame.getBoundingClientRect();
+  const ox = event.clientX - (rect.left + rect.width / 2);
+  const oy = event.clientY - (rect.top + rect.height / 2);
+  const prev = viewScale.value;
+  let delta = event.deltaY;
+  if (event.deltaMode === 1) delta *= 16;
+  if (event.deltaMode === 2) delta *= rect.height;
+  const next = Math.min(viewScaleMax, Math.max(viewScaleMin, prev * Math.exp(-delta * 0.0015)));
+  if (next === prev) return;
+  const lx = (ox - viewX.value) / prev;
+  const ly = (oy - viewY.value) / prev;
+  viewScale.value = next;
+  viewX.value = ox - lx * next;
+  viewY.value = oy - ly * next;
+}
+
+function onViewerPointerDown(event: PointerEvent) {
+  if (event.button !== 0) return;
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLElement)) return;
+  target.setPointerCapture(event.pointerId);
+  viewDrag = {
+    id: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+    originX: viewX.value,
+    originY: viewY.value,
+    moved: false,
+  };
+  event.preventDefault();
+}
+
+function onViewerPointerMove(event: PointerEvent) {
+  if (!viewDrag || event.pointerId !== viewDrag.id) return;
+  const dx = event.clientX - viewDrag.x;
+  const dy = event.clientY - viewDrag.y;
+  if (dx * dx + dy * dy > 9) viewDrag.moved = true;
+  viewX.value = viewDrag.originX + dx;
+  viewY.value = viewDrag.originY + dy;
+}
+
+function onViewerPointerUp(event: PointerEvent) {
+  if (!viewDrag || event.pointerId !== viewDrag.id) return;
+  const moved = viewDrag.moved;
+  viewDrag = null;
+  if (!moved) return;
+  ignoreViewerClick = true;
+  window.setTimeout(() => {
+    ignoreViewerClick = false;
+  }, 0);
+}
+
 function onKeydown(event: KeyboardEvent) {
+  if (imageOpen.value) {
+    if (event.key === "Escape") closeImage();
+    event.preventDefault();
+    return;
+  }
   if (event.key === "ArrowDown") {
     event.preventDefault();
     if (filtered.value.length === 0) return;
@@ -424,17 +555,33 @@ function captureScreen() {
 }
 
 function showHistory() {
+  closeImage();
   view.value = "history";
   focusSearch();
 }
 
 watch(() => settingsStore.guideOpen, (open) => {
-  if (open) view.value = "history";
-  else focusSearch();
+  if (open) {
+    closeImage();
+    view.value = "history";
+  } else focusSearch();
 });
+
+watch(
+  () => current.value?.id,
+  () => {
+    closeImage();
+  },
+);
 
 function onEscape(event: KeyboardEvent) {
   if (event.key !== "Escape") return;
+  if (imageOpen.value) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeImage();
+    return;
+  }
   if (settingsStore.capturing || settingsStore.guideOpen) return;
   if (!("__TAURI_INTERNALS__" in window)) return;
   event.preventDefault();
@@ -574,6 +721,8 @@ watch(selected, () => {
 
 onMounted(async () => {
   window.addEventListener("keydown", onEscape, true);
+  window.addEventListener("pointerdown", swallowDismissFollowup, true);
+  window.addEventListener("click", swallowDismissFollowup, true);
   if (!("__TAURI_INTERNALS__" in window)) return;
   window.addEventListener("mousedown", onDragPointerDown, true);
   unlisten = [
@@ -597,6 +746,7 @@ onMounted(async () => {
       onOcrUpdated(event.payload);
     }),
     await listen("window-shown", () => {
+      closeImage();
       view.value = "history";
       query.value = "";
       filter.value = "all";
@@ -605,7 +755,11 @@ onMounted(async () => {
       focusSearch();
     }),
     await listen("open-settings", () => {
+      closeImage();
       view.value = "settings";
+    }),
+    await listen("close-image-viewer", () => {
+      closeImage();
     }),
     await listen<{ effect: string }>("effect-changed", (event) => {
       document.documentElement.dataset.effect = event.payload.effect;
@@ -627,6 +781,8 @@ onMounted(async () => {
 onUnmounted(() => {
   window.clearTimeout(noticeTimer);
   window.removeEventListener("keydown", onEscape, true);
+  window.removeEventListener("pointerdown", swallowDismissFollowup, true);
+  window.removeEventListener("click", swallowDismissFollowup, true);
   window.removeEventListener("mousedown", onDragPointerDown, true);
   for (const stop of unlisten) stop();
 });
@@ -776,7 +932,7 @@ onUnmounted(() => {
         <div class="ph">
           <div>
             <div class="name">{{ kindLabel(current) }}</div>
-            <div v-if="settingsStore.settings.showSource && current.sourceApp" class="source">{{ current.sourceApp }}</div>
+            <div v-if="shownSource(current)" class="source">{{ shownSource(current) }}</div>
           </div>
           <div class="ph-actions">
             <button
@@ -825,7 +981,14 @@ onUnmounted(() => {
             <button type="button" class="btn pri" @click="pasteSelected()">{{ t("paste") }}</button>
           </div>
           <div class="shotbox">
-            <img v-if="currentImage" :src="currentImage" :alt="imageSize(current)" />
+            <img
+              v-if="currentImage"
+              :src="currentImage"
+              :alt="imageSize(current)"
+              :title="t('viewImageHint')"
+              draggable="false"
+              @click.stop="openImage"
+            />
             <p v-else>{{ t("loadingImage") }}</p>
           </div>
           <div class="ocr" :class="{ filled: currentText }">
@@ -836,7 +999,13 @@ onUnmounted(() => {
                   · {{ current.ocrLang }}
                 </template>
               </span>
-              <button type="button" class="link" @click="recognizeSelected">{{ t("recognizeAgain") }}</button>
+              <button
+                type="button"
+                :class="current.ocrStatus === 'none' ? 'btn pri prompt' : 'link'"
+                @click="recognizeSelected"
+              >
+                {{ current.ocrStatus === "none" ? t("recognize") : t("recognizeAgain") }}
+              </button>
             </div>
             <div v-if="currentText" class="card">{{ currentText }}</div>
           </div>
@@ -923,8 +1092,36 @@ onUnmounted(() => {
         </span>
         <span><kbd>Esc</kbd> {{ t("close") }}</span>
       </div>
-      <div class="count">{{ t("itemCount", { shortcut: settingsStore.settings.summonShortcut, n: clips.length }) }}</div>
+      <div class="count" :title="t('historyLimit')">{{ t("itemCount", { shortcut: settingsStore.settings.summonShortcut, n: clips.length, limit: settingsStore.settings.historyLimit }) }}</div>
     </footer>
+    <Transition name="viewer">
+      <div
+        v-if="imageOpen && current && currentImage"
+        class="viewer"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="t('viewImage')"
+        @click="onViewerBackdrop"
+        @wheel.prevent="onViewerWheel"
+      >
+        <img
+          :src="currentImage"
+          :alt="imageSize(current)"
+          :style="viewerTransform"
+          draggable="false"
+          @pointerdown="onViewerPointerDown"
+          @pointermove="onViewerPointerMove"
+          @pointerup="onViewerPointerUp"
+          @pointercancel="onViewerPointerUp"
+          @click.stop
+        />
+        <button type="button" class="viewer-x" :aria-label="t('close')" @click.stop="closeImage">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 7l10 10M17 7L7 17" />
+          </svg>
+        </button>
+      </div>
+    </Transition>
     <FirstRunGuide v-if="settingsStore.guideOpen" />
   </main>
 </template>
@@ -1487,6 +1684,68 @@ onUnmounted(() => {
   height: calc(100% - 20px);
   object-fit: contain;
   border-radius: 6px;
+  cursor: zoom-in;
+}
+.viewer {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  padding: 16px;
+  background: var(--scrim);
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+.viewer img {
+  position: relative;
+  z-index: 0;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  transform-origin: center center;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.viewer img:active {
+  cursor: grabbing;
+}
+.viewer-x {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-ctl);
+  background: var(--panel-solid);
+  color: var(--text);
+  cursor: pointer;
+}
+.viewer-x:hover {
+  background: var(--fill);
+}
+.viewer-x svg {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+.viewer-enter-active,
+.viewer-leave-active {
+  transition: opacity 160ms var(--ease);
+}
+.viewer-enter-from,
+.viewer-leave-to {
+  opacity: 0;
 }
 .shotbox p {
   margin: 0;
@@ -1508,11 +1767,16 @@ onUnmounted(() => {
 }
 .ocr-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
   color: var(--text-2);
   font-size: 11.5px;
+}
+.ocr-head .prompt {
+  flex: none;
+  height: 28px;
+  padding: 0 14px;
 }
 .ocr-head .ok {
   color: var(--good);

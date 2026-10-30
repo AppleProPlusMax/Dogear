@@ -207,6 +207,58 @@ fn image_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|err| format!("无法定位数据目录: {err}"))
 }
 
+pub struct Footprint {
+    pub pinned: bool,
+    pub hash: Option<String>,
+    pub text_bytes: u64,
+}
+
+/// 返回 `(总占用, 收藏占用)`。同一张图被收藏引用时，文件只算进收藏。
+pub fn usage(app: &AppHandle, clips: &[Footprint]) -> (u64, u64) {
+    let dir = image_dir(app).ok();
+    usage_in(dir.as_deref(), clips)
+}
+
+pub(crate) fn usage_in(dir: Option<&Path>, clips: &[Footprint]) -> (u64, u64) {
+    let mut kept_text = 0u64;
+    let mut other_text = 0u64;
+    let mut kept_hashes = std::collections::HashSet::new();
+    let mut other_hashes = std::collections::HashSet::new();
+    for clip in clips {
+        if clip.pinned {
+            kept_text += clip.text_bytes;
+            if let Some(hash) = &clip.hash {
+                kept_hashes.insert(hash.clone());
+            }
+        } else {
+            other_text += clip.text_bytes;
+            if let Some(hash) = &clip.hash {
+                other_hashes.insert(hash.clone());
+            }
+        }
+    }
+    let kept_files = sum_hashes(dir, kept_hashes.iter());
+    let other_files = sum_hashes(dir, other_hashes.difference(&kept_hashes));
+    let kept = kept_text + kept_files;
+    (kept + other_text + other_files, kept)
+}
+
+fn sum_hashes<'a>(dir: Option<&Path>, hashes: impl Iterator<Item = &'a String>) -> u64 {
+    let Some(dir) = dir else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for hash in hashes {
+        total += file_len(&dir.join(format!("{hash}.png")));
+        total += file_len(&dir.join(format!("{hash}-thumb.png")));
+    }
+    total
+}
+
+fn file_len(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+}
+
 /// 淘汰旧记录时顺手删掉不再被引用的原图与缩略图。
 pub fn remove_hashes(app: &AppHandle, hashes: &[String]) {
     if hashes.is_empty() {
@@ -314,8 +366,39 @@ fn base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{base64, cleanup_orphans_in, decode, encode, hash, remove_hashes_in};
+    use super::{base64, cleanup_orphans_in, decode, encode, hash, remove_hashes_in, usage_in, Footprint};
     use crate::state::Clip;
+
+    #[test]
+    fn favorite_files_are_not_counted_twice() {
+        let dir = std::env::temp_dir().join(format!("dogear-usage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("aaa.png"), vec![1u8; 10]).unwrap();
+        std::fs::write(dir.join("aaa-thumb.png"), vec![2u8; 4]).unwrap();
+        std::fs::write(dir.join("bbb.png"), vec![3u8; 7]).unwrap();
+        let clips = vec![
+            Footprint {
+                pinned: true,
+                hash: Some("aaa".into()),
+                text_bytes: 3,
+            },
+            Footprint {
+                pinned: false,
+                hash: Some("bbb".into()),
+                text_bytes: 5,
+            },
+            Footprint {
+                pinned: false,
+                hash: Some("aaa".into()),
+                text_bytes: 2,
+            },
+        ];
+        let (total, kept) = usage_in(Some(&dir), &clips);
+        assert_eq!(kept, 17);
+        assert_eq!(total, 31);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn base64_matches_known_values() {
