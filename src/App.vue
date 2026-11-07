@@ -8,6 +8,15 @@ import SettingsView from "./views/SettingsView.vue";
 import WindowControls from "./components/WindowControls.vue";
 import FirstRunGuide from "./components/FirstRunGuide.vue";
 import {
+  layoutOffsets,
+  revealScroll,
+  searchText,
+  textMatches,
+  visibleRange,
+  ITEM_H,
+  type SearchText,
+} from "./listWindow";
+import {
   armWindowDrag,
   clipImage,
   clipThumb,
@@ -105,7 +114,11 @@ let colorToken = 0;
 const searchEl = ref<HTMLInputElement | null>(null);
 /// 图片以 data URL 取回，按条目缓存，避免每次切换选中都重新读盘。
 const thumbs = ref<Record<number, string>>({});
+const thumbMiss = new Set<number>();
+const thumbPending = new Map<number, number>();
+let thumbTicket = 0;
 const titleCache = new Map<number, string>();
+const searchCache = new Map<number, { text: SearchText; content: string; ocr: string; source: string }>();
 const pendingChanges: ClipsChanged[] = [];
 const pendingOcr = new Map<number, OcrUpdate>();
 let historyReady = false;
@@ -180,15 +193,30 @@ function itemSub(clip: Clip) {
   return source ? `${source} · ${body}` : body;
 }
 
+function cachedSearchText(clip: Clip) {
+  const ocr = clip.ocrText ?? "";
+  const source = shownSource(clip);
+  const found = searchCache.get(clip.id);
+  if (found && found.content === clip.content && found.ocr === ocr && found.source === source) return found.text;
+  const text = searchText(clip.content, ocr, source);
+  searchCache.set(clip.id, { text, content: clip.content, ocr, source });
+  return text;
+}
+
+function dropClipCache(id: number) {
+  titleCache.delete(id);
+  searchCache.delete(id);
+  thumbMiss.delete(id);
+  thumbPending.delete(id);
+  pendingOcr.delete(id);
+  delete thumbs.value[id];
+  delete fullImages.value[id];
+}
+
 const searched = computed(() => {
   const q = query.value.trim().toLowerCase();
   if (!q) return clips.value;
-  return clips.value.filter(
-    (clip) =>
-      clip.content.toLowerCase().includes(q)
-      || (clip.ocrText ?? "").toLowerCase().includes(q)
-      || shownSource(clip).toLowerCase().includes(q),
-  );
+  return clips.value.filter((clip) => textMatches(cachedSearchText(clip), q));
 });
 
 function countOf(id: FilterId) {
@@ -216,10 +244,137 @@ const groups = computed(() => {
   return [...buckets.entries()];
 });
 
+type FlatRow =
+  | { type: "group"; key: string; label: string }
+  | { type: "item"; key: string; index: number; clip: Clip };
+
+const listEl = ref<HTMLElement | null>(null);
+const scrollTop = ref(0);
+const listHeight = ref(640);
+let anchorId = 0;
+let anchorDelta = 0;
+
+const flatRows = computed(() => {
+  const out: FlatRow[] = [];
+  for (const [label, items] of groups.value) {
+    out.push({ type: "group", key: `g:${label}`, label });
+    for (const item of items) out.push({ type: "item", key: `i:${item.clip.id}`, index: item.index, clip: item.clip });
+  }
+  return out;
+});
+
+const rowLayout = computed(() => layoutOffsets(flatRows.value.map((row) => row.type)));
+
+const windowed = computed(() => {
+  const rows = flatRows.value;
+  const layout = rowLayout.value;
+  const maxScroll = Math.max(0, layout.total - listHeight.value);
+  const top = Math.min(scrollTop.value, maxScroll);
+  const range = visibleRange(layout.offsets, rows.map((row) => row.type), top, listHeight.value);
+  return {
+    rows: rows.slice(range.start, range.end),
+    offset: layout.offsets[range.start] ?? 0,
+    total: layout.total,
+  };
+});
+
+function captureAnchor() {
+  const el = listEl.value;
+  if (!el || el.scrollTop <= 0) {
+    anchorId = 0;
+    return;
+  }
+  const layout = rowLayout.value;
+  const rows = flatRows.value;
+  const range = visibleRange(layout.offsets, rows.map((row) => row.type), el.scrollTop, el.clientHeight, 0);
+  for (let index = range.start; index < rows.length; index++) {
+    const row = rows[index];
+    if (row.type !== "item") continue;
+    anchorId = row.clip.id;
+    anchorDelta = el.scrollTop - layout.offsets[index];
+    return;
+  }
+  anchorId = 0;
+}
+
+function restoreAnchor() {
+  const el = listEl.value;
+  if (!el || !anchorId) return;
+  const index = flatRows.value.findIndex((row) => row.type === "item" && row.clip.id === anchorId);
+  if (index < 0) return;
+  const next = Math.max(0, rowLayout.value.offsets[index] + anchorDelta);
+  if (Math.abs(next - el.scrollTop) < 1) return;
+  el.scrollTop = next;
+  scrollTop.value = el.scrollTop;
+}
+
+function scrollSelectedIntoView() {
+  const el = listEl.value;
+  if (!el) return;
+  const index = flatRows.value.findIndex((row) => row.type === "item" && row.index === selected.value);
+  if (index < 0) return;
+  const next = revealScroll(rowLayout.value.offsets[index], ITEM_H, el.scrollTop, el.clientHeight);
+  if (next !== el.scrollTop) {
+    el.scrollTop = next;
+    scrollTop.value = next;
+  }
+  captureAnchor();
+}
+
+function onListScroll(event: Event) {
+  const el = event.target;
+  if (!(el instanceof HTMLElement)) return;
+  scrollTop.value = el.scrollTop;
+  captureAnchor();
+}
+
+watch(listEl, (el, _, onCleanup) => {
+  if (!el) {
+    scrollTop.value = 0;
+    anchorId = 0;
+    return;
+  }
+  scrollTop.value = el.scrollTop;
+  const observer = new ResizeObserver(() => {
+    listHeight.value = el.clientHeight;
+  });
+  observer.observe(el);
+  listHeight.value = el.clientHeight;
+  onCleanup(() => observer.disconnect());
+});
+
+watch(flatRows, () => {
+  nextTick(() => restoreAnchor());
+});
+
+watch([query, filter], () => {
+  anchorId = 0;
+  scrollTop.value = 0;
+  if (listEl.value) listEl.value.scrollTop = 0;
+});
+
+watch(
+  () => settingsStore.settings.showSource,
+  () => searchCache.clear(),
+);
+
+watch(
+  () => {
+    const visible = windowed.value.rows
+      .flatMap((row) => (row.type === "item" && row.clip.kind === "image" ? [row.clip.id] : []))
+      .join(",");
+    const selectedId = current.value?.kind === "image" ? current.value.id : "";
+    return `${visible}|${selectedId}`;
+  },
+  () => {
+    void loadVisibleThumbs();
+  },
+);
+
 async function refresh() {
+  searchCache.clear();
   clips.value = await listClips();
   if (selected.value >= filtered.value.length) selected.value = 0;
-  void loadThumbs();
   void loadFullImage();
 }
 
@@ -230,8 +385,7 @@ function applySteps(steps: ClipsChanged["steps"]) {
     for (const id of step.removedIds) {
       const index = next.findIndex((clip) => clip.id === id);
       if (index >= 0) next.splice(index, 1);
-      titleCache.delete(id);
-      pendingOcr.delete(id);
+      dropClipCache(id);
     }
     const index = next.findIndex((clip) => clip.id === step.clip.id);
     if (index >= 0) next.splice(index, 1);
@@ -242,12 +396,12 @@ function applySteps(steps: ClipsChanged["steps"]) {
       step.clip.ocrLang = earlier.ocrLang;
       pendingOcr.delete(step.clip.id);
     }
+    searchCache.delete(step.clip.id);
     next.unshift(step.clip);
     if (step.clip.kind !== "image") titleCache.set(step.clip.id, firstLine(step.clip.content));
   }
   clips.value = next;
   if (selected.value >= filtered.value.length) selected.value = 0;
-  void loadThumbs();
   void loadFullImage();
 }
 
@@ -259,6 +413,7 @@ function onClipsChanged(payload: ClipsChanged) {
 }
 
 function applyOcr(update: OcrUpdate) {
+  searchCache.delete(update.id);
   const clip = clips.value.find((item) => item.id === update.id);
   if (!clip) return false;
   clip.ocrStatus = update.ocrStatus;
@@ -272,13 +427,26 @@ function onOcrUpdated(update: OcrUpdate) {
   if (!historyReady || !applyOcr(update)) pendingOcr.set(update.id, update);
 }
 
-async function loadThumbs() {
-  for (const clip of clips.value) {
-    if (clip.kind !== "image" || thumbs.value[clip.id]) continue;
+async function loadVisibleThumbs() {
+  const ids: number[] = [];
+  for (const row of windowed.value.rows) {
+    if (row.type !== "item" || row.clip.kind !== "image") continue;
+    ids.push(row.clip.id);
+  }
+  const selectedClip = current.value;
+  if (selectedClip?.kind === "image") ids.push(selectedClip.id);
+  for (const id of ids) {
+    if (thumbs.value[id] || thumbMiss.has(id) || thumbPending.has(id)) continue;
+    const ticket = ++thumbTicket;
+    thumbPending.set(id, ticket);
     try {
-      thumbs.value[clip.id] = await clipThumb(clip.id);
+      const url = await clipThumb(id);
+      if (thumbPending.get(id) !== ticket) continue;
+      thumbs.value[id] = url;
     } catch {
-      // 缩略图缺失时退回到类型图标，不打扰用户。
+      if (thumbPending.get(id) === ticket) thumbMiss.add(id);
+    } finally {
+      if (thumbPending.get(id) === ticket) thumbPending.delete(id);
     }
   }
 }
@@ -383,7 +551,7 @@ async function deleteSelected() {
     await deleteClip(id);
     const index = clips.value.findIndex((item) => item.id === id);
     if (index >= 0) clips.value.splice(index, 1);
-    titleCache.delete(id);
+    dropClipCache(id);
     if (selected.value >= filtered.value.length) {
       selected.value = Math.max(0, filtered.value.length - 1);
     }
@@ -743,9 +911,7 @@ watch(view, (next) => {
 watch(selected, () => {
   if (!suppressNoticeClear) clearNotice();
   void loadFullImage();
-  nextTick(() => {
-    document.querySelector(".item.on")?.scrollIntoView({ block: "nearest" });
-  });
+  nextTick(() => scrollSelectedIntoView());
 });
 
 onMounted(async () => {
@@ -759,11 +925,7 @@ onMounted(async () => {
       const gone = new Set(event.payload.removedIds);
       if (!gone.size) return;
       clips.value = clips.value.filter((clip) => !gone.has(clip.id));
-      for (const id of gone) {
-        titleCache.delete(id);
-        delete thumbs.value[id];
-        delete fullImages.value[id];
-      }
+      for (const id of gone) dropClipCache(id);
       if (selected.value >= filtered.value.length) {
         selected.value = Math.max(0, filtered.value.length - 1);
       }
@@ -906,54 +1068,57 @@ onUnmounted(() => {
     <p v-if="settingsStore.settings.pauseRecording" class="paused">{{ t("pausedBanner") }}</p>
 
     <div class="body">
-      <section v-if="filtered.length" class="list">
-        <template v-for="[label, items] in groups" :key="label">
-          <div class="grp">{{ label }}</div>
-          <button
-            v-for="item in items"
-            :key="item.clip.id"
-            type="button"
-            class="item"
-            :class="{ on: item.index === selected, kept: item.clip.pinned }"
-            @click="selected = item.index"
-            @dblclick="pasteSelected($event.shiftKey)"
-          >
-            <span v-if="thumbs[item.clip.id]" class="tile shot">
-              <img :src="thumbs[item.clip.id]" alt="" />
-            </span>
-            <span v-else class="tile" :class="item.clip.kind">
-              <svg v-if="item.clip.kind === 'link'" viewBox="0 0 24 24">
-                <path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1" />
-                <path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" />
-              </svg>
-              <svg v-else-if="item.clip.kind === 'code'" viewBox="0 0 24 24">
-                <path d="M9 8L5 12l4 4" />
-                <path d="M15 8l4 4-4 4" />
-              </svg>
-              <svg v-else-if="item.clip.kind === 'image'" viewBox="0 0 24 24">
-                <rect x="4" y="5" width="16" height="14" rx="2.5" />
-                <circle cx="9" cy="10" r="1.6" />
-                <path d="M5 17l4.5-4.5 3.5 3.5 2.5-2.5L19 17" />
-              </svg>
-              <svg v-else viewBox="0 0 24 24">
-                <path d="M5 7h14M5 12h14M5 17h9" />
-              </svg>
-            </span>
-            <span class="meta">
-              <span class="title" :class="{ mono: item.clip.kind === 'link' || item.clip.kind === 'code' }">{{ itemTitle(item.clip) }}</span>
-              <span class="sub">
-                {{ itemSub(item.clip) }}
-                <i v-if="item.clip.ocrStatus === 'pending'" class="spin" aria-hidden="true"></i>
-              </span>
-            </span>
-            <span class="time">{{ relativeTime(item.clip.createdAt) }}</span>
-            <svg v-if="item.clip.pinned" class="dogear" viewBox="0 0 26 26" aria-hidden="true">
-              <path d="M26 0 L7 0 L26 19 Z" fill="color-mix(in srgb, var(--text) 18%, transparent)" />
-              <path d="M26 0 L11 0 L26 15 Z" fill="var(--warn)" />
-              <path d="M12.2 1.2 L24.8 13.8" stroke="rgba(255,255,255,0.8)" stroke-width="1.15" fill="none" />
-            </svg>
-          </button>
-        </template>
+      <section v-if="filtered.length" ref="listEl" class="list" @scroll="onListScroll">
+        <div class="list-spacer" :style="{ height: `${windowed.total}px` }">
+          <div class="list-window" :style="{ transform: `translateY(${windowed.offset}px)` }">
+            <template v-for="row in windowed.rows" :key="row.key">
+              <div v-if="row.type === 'group'" class="grp">{{ row.label }}</div>
+              <button
+                v-else
+                type="button"
+                class="item"
+                :class="{ on: row.index === selected, kept: row.clip.pinned }"
+                @click="selected = row.index"
+                @dblclick="pasteSelected($event.shiftKey)"
+              >
+                <span v-if="thumbs[row.clip.id]" class="tile shot">
+                  <img :src="thumbs[row.clip.id]" alt="" />
+                </span>
+                <span v-else class="tile" :class="row.clip.kind">
+                  <svg v-if="row.clip.kind === 'link'" viewBox="0 0 24 24">
+                    <path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1" />
+                    <path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" />
+                  </svg>
+                  <svg v-else-if="row.clip.kind === 'code'" viewBox="0 0 24 24">
+                    <path d="M9 8L5 12l4 4" />
+                    <path d="M15 8l4 4-4 4" />
+                  </svg>
+                  <svg v-else-if="row.clip.kind === 'image'" viewBox="0 0 24 24">
+                    <rect x="4" y="5" width="16" height="14" rx="2.5" />
+                    <circle cx="9" cy="10" r="1.6" />
+                    <path d="M5 17l4.5-4.5 3.5 3.5 2.5-2.5L19 17" />
+                  </svg>
+                  <svg v-else viewBox="0 0 24 24">
+                    <path d="M5 7h14M5 12h14M5 17h9" />
+                  </svg>
+                </span>
+                <span class="meta">
+                  <span class="title" :class="{ mono: row.clip.kind === 'link' || row.clip.kind === 'code' }">{{ itemTitle(row.clip) }}</span>
+                  <span class="sub">
+                    {{ itemSub(row.clip) }}
+                    <i v-if="row.clip.ocrStatus === 'pending'" class="spin" aria-hidden="true"></i>
+                  </span>
+                </span>
+                <span class="time">{{ relativeTime(row.clip.createdAt) }}</span>
+                <svg v-if="row.clip.pinned" class="dogear" viewBox="0 0 26 26" aria-hidden="true">
+                  <path d="M26 0 L7 0 L26 19 Z" fill="color-mix(in srgb, var(--text) 18%, transparent)" />
+                  <path d="M26 0 L11 0 L26 15 Z" fill="var(--warn)" />
+                  <path d="M12.2 1.2 L24.8 13.8" stroke="rgba(255,255,255,0.8)" stroke-width="1.15" fill="none" />
+                </svg>
+              </button>
+            </template>
+          </div>
+        </div>
       </section>
       <section v-else class="list empty">
         <p v-if="clips.length === 0">{{ t("emptyHistory", { shortcut: settingsStore.settings.summonShortcut }) }}</p>
@@ -1356,9 +1521,21 @@ onUnmounted(() => {
   min-height: 0;
   min-width: 0;
   overflow: auto;
-  padding: 6px 8px 12px;
+  overflow-anchor: none;
+  padding: 0 8px;
   border-right: 1px solid var(--sep);
 }
+.list-spacer {
+  position: relative;
+  width: 100%;
+}
+.list-window {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+}
+.list.empty,
 .list.empty,
 .preview.quiet {
   display: flex;
@@ -1369,15 +1546,26 @@ onUnmounted(() => {
   text-align: center;
 }
 .grp {
+  box-sizing: border-box;
+  height: 28px;
+  margin: 0;
+  overflow: hidden;
+  white-space: nowrap;
   font-size: 11.5px;
   font-weight: 600;
+  line-height: 14px;
   color: var(--text-3);
   padding: 10px 10px 4px;
 }
 .item {
   position: relative;
   overflow: hidden;
+  box-sizing: border-box;
   width: 100%;
+  height: 54px;
+  min-height: 54px;
+  max-height: 54px;
+  margin: 0;
   display: flex;
   align-items: center;
   gap: 11px;
