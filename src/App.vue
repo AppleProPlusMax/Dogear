@@ -11,11 +11,12 @@ import {
   layoutOffsets,
   revealScroll,
   searchText,
-  textMatches,
   visibleRange,
   ITEM_H,
   type SearchText,
 } from "./listWindow";
+import { paint, type Piece, type PaintMode } from "./richText";
+import { clipMatches, parseSearch } from "./searchQuery";
 import {
   armWindowDrag,
   clipImage,
@@ -137,6 +138,8 @@ const languageNames: Record<string, string> = {
   java: "Java",
   json: "JSON",
   sql: "SQL",
+  c: "C",
+  cpp: "C++",
   other: "",
 };
 
@@ -162,6 +165,22 @@ function ocrLabel(clip: Clip) {
   if (clip.ocrStatus === "empty") return t("ocrEmpty");
   if (clip.ocrStatus === "done") return t("ocrDone", { n: (clip.ocrText ?? "").length });
   return "";
+}
+
+function partClass(part: Piece) {
+  if (part.hit) return "hit";
+  if (part.tone === "key") return "tok-key";
+  if (part.tone === "str") return "tok-str";
+  if (part.tone === "num") return "tok-num";
+  if (part.tone === "bool") return "tok-bool";
+  if (part.tone === "kw") return "tok-kw";
+  if (part.tone === "note") return "tok-note";
+  if (part.tone === "attr") return "tok-attr";
+  return undefined;
+}
+
+function titleParts(clip: Clip) {
+  return paint(itemTitle(clip), "plain", parsedSearch.value.text);
 }
 
 function itemTitle(clip: Clip) {
@@ -213,10 +232,12 @@ function dropClipCache(id: number) {
   delete fullImages.value[id];
 }
 
+const parsedSearch = computed(() => parseSearch(query.value));
+
 const searched = computed(() => {
-  const q = query.value.trim().toLowerCase();
-  if (!q) return clips.value;
-  return clips.value.filter((clip) => textMatches(cachedSearchText(clip), q));
+  const parsed = parsedSearch.value;
+  if (!parsed.language && !parsed.ocrOnly && !parsed.pinnedOnly && !parsed.text) return clips.value;
+  return clips.value.filter((clip) => clipMatches(clip, parsed, cachedSearchText(clip)));
 });
 
 function countOf(id: FilterId) {
@@ -478,6 +499,27 @@ const displayContent = computed(() => {
   if (!clip) return "";
   if (clip.kind === "code" && codeView.value !== "raw") return shownCode.value || clip.content;
   return clip.content;
+});
+
+const previewParts = computed(() => {
+  const clip = current.value;
+  if (!clip) return [];
+  const text = clip.kind === "image" ? currentText.value : displayContent.value;
+  const mode: PaintMode =
+    clip.kind !== "image" &&
+    (clip.language === "json" ||
+      clip.language === "sql" ||
+      clip.language === "js" ||
+      clip.language === "ts" ||
+      clip.language === "java" ||
+      clip.language === "python" ||
+      clip.language === "html" ||
+      clip.language === "css" ||
+      clip.language === "c" ||
+      clip.language === "cpp")
+      ? clip.language
+      : "plain";
+  return paint(text, mode, parsedSearch.value.text);
 });
 
 function clipView(clip: Clip | undefined) {
@@ -1037,6 +1079,7 @@ onUnmounted(() => {
           v-model="query"
           type="text"
           :placeholder="t('searchPlaceholder')"
+          :title="t('searchHint')"
           spellcheck="false"
           @input="selected = 0"
         />
@@ -1103,7 +1146,9 @@ onUnmounted(() => {
                   </svg>
                 </span>
                 <span class="meta">
-                  <span class="title" :class="{ mono: row.clip.kind === 'link' || row.clip.kind === 'code' }">{{ itemTitle(row.clip) }}</span>
+                  <span class="title" :class="{ mono: row.clip.kind === 'link' || row.clip.kind === 'code' }">
+                    <span v-for="(part, index) in titleParts(row.clip)" :key="index" :class="partClass(part)">{{ part.text }}</span>
+                  </span>
                   <span class="sub">
                     {{ itemSub(row.clip) }}
                     <i v-if="row.clip.ocrStatus === 'pending'" class="spin" aria-hidden="true"></i>
@@ -1204,7 +1249,9 @@ onUnmounted(() => {
                 {{ current.ocrStatus === "none" ? t("recognize") : t("recognizeAgain") }}
               </button>
             </div>
-            <div v-if="currentText" class="card">{{ currentText }}</div>
+            <div v-if="currentText" class="card">
+              <span v-for="(part, index) in previewParts" :key="index" :class="partClass(part)">{{ part.text }}</span>
+            </div>
           </div>
           <div class="facts">
             <span><b>{{ current.width ?? 0 }}</b> × <b>{{ current.height ?? 0 }}</b> {{ t("pixels") }}</span>
@@ -1233,7 +1280,9 @@ onUnmounted(() => {
             <button type="button" class="btn" @click="copySelected()">{{ t("copy") }}</button>
             <button type="button" class="btn pri" @click="pasteSelected()">{{ t("paste") }}</button>
           </div>
-          <div class="card" :class="{ mono: current.kind !== 'text' }">{{ displayContent }}</div>
+          <div class="card" :class="{ mono: current.kind !== 'text' }">
+            <span v-for="(part, index) in previewParts" :key="index" :class="partClass(part)">{{ part.text }}</span>
+          </div>
           <div class="facts">
             <span><b>{{ lineCount(displayContent) }}</b> {{ t("lines") }}</span>
             <i></i>
@@ -1648,6 +1697,28 @@ onUnmounted(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.hit {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 3px;
+}
+.tok-key,
+.tok-kw {
+  color: var(--tile-code);
+}
+.tok-str {
+  color: var(--accent);
+}
+.tok-num {
+  color: var(--warn);
+}
+.tok-bool,
+.tok-attr {
+  color: var(--text-2);
+}
+.tok-note {
+  color: var(--text-3);
 }
 .title.mono,
 .card.mono {

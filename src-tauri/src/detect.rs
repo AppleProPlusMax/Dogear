@@ -385,6 +385,8 @@ fn guess_language(text: &str) -> &'static str {
         ("shell", 0),
         ("ts", 0),
         ("js", 0),
+        ("cpp", 0),
+        ("c", 0),
     ];
     let add = |scores: &mut [(&str, i32)], name: &str, amount: i32| {
         if let Some(slot) = scores.iter_mut().find(|(lang, _)| *lang == name) {
@@ -409,6 +411,27 @@ fn guess_language(text: &str) -> &'static str {
     }
     if text.contains("public class") || text.contains("public static") || text.contains("System.out") {
         add(&mut scores, "java", 3);
+    }
+    let cpp = (text.contains("#include")
+        && (text.contains("std::")
+            || text.contains("iostream")
+            || text.contains("nullptr")
+            || contains_word(text, "cout")
+            || contains_word(text, "cin")
+            || contains_word(text, "namespace")
+            || text.contains("template<")
+            || text.contains("template <")))
+        || contains_word(text, "cout")
+        || text.contains("nullptr")
+        || (contains_word(text, "namespace") && text.contains("::"));
+    if cpp {
+        add(&mut scores, "cpp", 4);
+    } else if text.contains("#include")
+        || contains_word(text, "printf")
+        || contains_word(text, "scanf")
+        || text.contains("int main")
+    {
+        add(&mut scores, "c", 4);
     }
     if contains_word(text, "def") || contains_word(text, "elif") || contains_word(text, "lambda") || text.contains("self.")
     {
@@ -846,6 +869,34 @@ mod tests {
         let found = classify("<div class=\"panel\">\n  <span>折角</span>\n</div>\n");
         assert_eq!(found.kind, "code");
         assert_eq!(found.language, Some("html"));
+    }
+
+    #[test]
+    fn stylesheet_is_css() {
+        let found = classify(".panel {\n  color: #fff;\n  margin: 10px;\n}\n");
+        assert_eq!(found.kind, "code");
+        assert_eq!(found.language, Some("css"));
+    }
+
+    #[test]
+    fn c_program_is_c() {
+        let found = classify("#include <stdio.h>\nint main(void) {\n    printf(\"hi\\n\");\n    return 0;\n}\n");
+        assert_eq!(found.kind, "code");
+        assert_eq!(found.language, Some("c"));
+    }
+
+    #[test]
+    fn cpp_stream_is_cpp() {
+        let found = classify("#include <iostream>\nint main() {\n    std::cout << \"hi\\n\";\n    return 0;\n}\n");
+        assert_eq!(found.kind, "code");
+        assert_eq!(found.language, Some("cpp"));
+    }
+
+    #[test]
+    fn java_class_stays_java() {
+        let found = classify("public class Main {\n    public static void main(String[] args) {\n        System.out.println(\"hi\");\n    }\n}\n");
+        assert_eq!(found.kind, "code");
+        assert_eq!(found.language, Some("java"));
     }
 
     #[test]
