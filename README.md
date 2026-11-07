@@ -4,14 +4,15 @@
 
 轻量、离线的 Windows 剪切板工具。复制过的都找得回：快捷键呼出，输入即搜索，回车即粘贴。
 
-当前版本 0.1.7。历史、粘贴、截图和本机文字识别已经能用。技术栈是 Tauri 2、Vue 3、TypeScript 和 SQLite。设计说明见 [docs/design.md](docs/design.md)。以 [Apache-2.0](LICENSE) 许可发布。
+当前版本 0.1.8。历史、粘贴、截图和本机文字识别已经能用。技术栈是 Tauri 2、Vue 3、TypeScript 和 SQLite。设计说明见 [docs/design.md](docs/design.md)。以 [Apache-2.0](LICENSE) 许可发布。
 
 ## 它做什么
 
 - 记住文字、链接、代码和图片。关掉窗口也不会丢，下次打开还在。
 - 收藏一条后，它不会被条数上限清掉。清空历史时也会留下收藏。
 - 记下复制来自哪个程序，可以在设置里隐藏，也可以忽略某些程序。
-- 代码可以按格式化、压缩或原文查看。文字里的颜色会单独列出来。
+- 搜索可以加 `type:json`、`ocr:词`、`pin:词` 这样的前缀，命中的词会标出来。
+- 代码可以按格式化、压缩或原文查看。JSON、SQL 和常见编程语言会在预览里上色。文字里的颜色会单独列出来。
 - 图片用本机的 Windows 文字识别，不把内容发到网上。单击图片可以放大查看。
 - 界面可以在简体中文和英语之间切换。
 
@@ -21,8 +22,8 @@
 
 从 [Releases](https://github.com/AppleProPlusMax/Dogear/releases) 下载。
 
-- `Dogear_0.1.7_x64_zh-CN.msi`：推荐。会覆盖同一产品的旧版，并卸掉以前用 setup.exe 装到别处的那一份。
-- `Dogear_0.1.7_x64-setup.exe`：NSIS 安装包。
+- `Dogear_0.1.8_x64_zh-CN.msi`：推荐。会覆盖同一产品的旧版，并卸掉以前用 setup.exe 装到别处的那一份。
+- `Dogear_0.1.8_x64-setup.exe`：NSIS 安装包。
 
 安装包没有代码签名。Windows 若提示风险，选择仍要运行。系统需要 WebView2，Windows 11 一般已经带有。
 

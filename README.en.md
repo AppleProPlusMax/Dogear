@@ -4,14 +4,15 @@
 
 A small, offline clipboard manager for Windows. What you copy stays findable: summon it with a shortcut, type to search, and press Enter to paste.
 
-This is version 0.1.7. History, paste, screenshots, and on-device text recognition are already usable. The stack is Tauri 2, Vue 3, TypeScript, and SQLite. The design notes are in [docs/design.md](docs/design.md). Released under the [Apache-2.0](LICENSE) license.
+This is version 0.1.8. History, paste, screenshots, and on-device text recognition are already usable. The stack is Tauri 2, Vue 3, TypeScript, and SQLite. The design notes are in [docs/design.md](docs/design.md). Released under the [Apache-2.0](LICENSE) license.
 
 ## What it does
 
 - Keeps text, links, code, and images. Closing the window does not throw them away.
 - A favorite is not removed by the history limit, and clearing history leaves favorites in place.
 - Records which app a copy came from. You can hide that label, or ignore copies from chosen apps.
-- Code can be shown formatted, compacted, or as the original text. Colors found in text are listed on their own.
+- Search accepts prefixes such as `type:json`, `ocr:word`, and `pin:word`, and marks the words that matched.
+- Code can be shown formatted, compacted, or as the original text. JSON, SQL, and common programming languages are colored in the preview. Colors found in text are listed on their own.
 - Images are read with the Windows OCR engine on this PC. Nothing is sent to a cloud service. Click an image to look at it larger.
 - The interface can be switched between Simplified Chinese and English.
 
@@ -21,8 +22,8 @@ Clipboard contents stay on this computer. The app does not connect to the networ
 
 Download a build from [Releases](https://github.com/AppleProPlusMax/Dogear/releases).
 
-- `Dogear_0.1.7_x64_zh-CN.msi` is the one to use. It replaces an older copy of the same product, and removes a previous setup.exe install.
-- `Dogear_0.1.7_x64-setup.exe` is the NSIS installer.
+- `Dogear_0.1.8_x64_zh-CN.msi` is the one to use. It replaces an older copy of the same product, and removes a previous setup.exe install.
+- `Dogear_0.1.8_x64-setup.exe` is the NSIS installer.
 
 The packages are not code-signed. If Windows shows a warning, choose to run it anyway. WebView2 is required; Windows 11 usually already has it.
 
