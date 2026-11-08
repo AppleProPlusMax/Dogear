@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use windows::core::w;
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HGLOBAL};
+use windows::Win32::Foundation::{CloseHandle, GlobalFree, HANDLE, HGLOBAL};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
     BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HGDIOBJ,
@@ -221,6 +221,11 @@ pub fn read() -> ClipboardRead {
                 return ClipboardRead::Empty;
             }
             let outcome = read_unicode();
+            if matches!(outcome, ClipboardRead::Empty) && image_format_present() {
+                let grabbed = grab_image();
+                let _ = CloseClipboard();
+                return finish_grab(grabbed);
+            }
             let _ = CloseClipboard();
             return outcome;
         }
@@ -252,21 +257,24 @@ pub fn write_text(text: &str) -> Result<(), String> {
         let locked = GlobalLock(handle);
         if locked.is_null() {
             clear_skipped_listener();
-            return Err("无法锁定剪切板内存".into());
+            return Err({ let _ = GlobalFree(Some(handle)); "无法锁定剪切板内存".into() });
         }
         std::ptr::copy_nonoverlapping(wide.as_ptr(), locked as *mut u16, wide.len());
-        let _ = GlobalUnlock(handle);
+        let _ = GlobalUnlock(handle); let pair = (handle, HGLOBAL::default());
         if OpenClipboard(None).is_err() {
             clear_skipped_listener();
-            return Err("无法打开剪切板".into());
+            return Err({ let _ = GlobalFree(Some(pair.0)); if !pair.1.is_invalid() { let _ = GlobalFree(Some(pair.1)); } "无法打开剪切板".into() });
         }
         if EmptyClipboard().is_err() {
             let _ = CloseClipboard();
             clear_skipped_listener();
-            return Err("无法清空剪切板".into());
+            return Err({ let _ = GlobalFree(Some(pair.0)); if !pair.1.is_invalid() { let _ = GlobalFree(Some(pair.1)); } "无法清空剪切板".into() });
         }
         mark_self_write(text);
         let set = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(handle.0)));
+        if set.is_err() {
+            let _ = GlobalFree(Some(handle));
+        }
         let _ = CloseClipboard();
         if let Err(err) = set {
             clear_skipped_listener();
@@ -285,15 +293,15 @@ pub fn write_image(png: &[u8], hash: &str) -> Result<(), String> {
     let dib = build_dib(decoded.width, decoded.height, &decoded.bgra)?;
     skip_listener_once();
     unsafe {
-        let png_format = RegisterClipboardFormatW(w!("PNG"));
-        let png_handle = match alloc_global(png) {
+        let png_format = RegisterClipboardFormatW(w!("PNG")); let mut pair = (HGLOBAL::default(), HGLOBAL::default());
+        let png_handle = match alloc_global(png, &mut pair.0, None) {
             Ok(handle) => handle,
             Err(err) => {
                 clear_skipped_listener();
                 return Err(err);
             }
         };
-        let dib_handle = match alloc_global(&dib) {
+        let dib_handle = match alloc_global(&dib, &mut pair.1, Some(png_handle)) {
             Ok(handle) => handle,
             Err(err) => {
                 clear_skipped_listener();
@@ -303,18 +311,25 @@ pub fn write_image(png: &[u8], hash: &str) -> Result<(), String> {
 
         if OpenClipboard(None).is_err() {
             clear_skipped_listener();
-            return Err("无法打开剪切板".into());
+            return Err({ let _ = GlobalFree(Some(pair.0)); if !pair.1.is_invalid() { let _ = GlobalFree(Some(pair.1)); } "无法打开剪切板".into() });
         }
         if EmptyClipboard().is_err() {
             let _ = CloseClipboard();
             clear_skipped_listener();
-            return Err("无法清空剪切板".into());
+            return Err({ let _ = GlobalFree(Some(pair.0)); if !pair.1.is_invalid() { let _ = GlobalFree(Some(pair.1)); } "无法清空剪切板".into() });
         }
         mark_self_image(hash);
         if png_format != 0 {
-            let _ = SetClipboardData(png_format, Some(HANDLE(png_handle.0)));
+            if SetClipboardData(png_format, Some(HANDLE(png_handle.0))).is_err() {
+                let _ = GlobalFree(Some(png_handle));
+            }
+        } else {
+            let _ = GlobalFree(Some(png_handle));
         }
         let set = SetClipboardData(CF_DIB, Some(HANDLE(dib_handle.0)));
+        if set.is_err() {
+            let _ = GlobalFree(Some(dib_handle));
+        }
         let _ = CloseClipboard();
         if let Err(err) = set {
             clear_skipped_listener();
@@ -327,11 +342,32 @@ pub fn write_image(png: &[u8], hash: &str) -> Result<(), String> {
     Ok(())
 }
 
-unsafe fn alloc_global(bytes: &[u8]) -> Result<HGLOBAL, String> {
+unsafe fn alloc_global(bytes: &[u8], slot: &mut HGLOBAL, prev: Option<HGLOBAL>) -> Result<HGLOBAL, String> {
+    let handle = GlobalAlloc(GMEM_MOVEABLE, bytes.len()).map_err(|err| {
+        if let Some(p) = prev {
+            let _ = GlobalFree(Some(p));
+        }
+        err.to_string()
+    })?;
+    let locked = GlobalLock(handle);
+    if locked.is_null() {
+        let _ = GlobalFree(Some(handle));
+        if let Some(p) = prev {
+            let _ = GlobalFree(Some(p));
+        }
+        return Err("无法锁定剪切板内存".into());
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), locked as *mut u8, bytes.len());
+    let _ = GlobalUnlock(handle);
+    *slot = handle;
+    Ok(handle)
+}
+#[allow(dead_code)]
+unsafe fn alloc_global_unused(bytes: &[u8]) -> Result<HGLOBAL, String> {
     let handle = GlobalAlloc(GMEM_MOVEABLE, bytes.len()).map_err(|err| err.to_string())?;
     let locked = GlobalLock(handle);
     if locked.is_null() {
-        return Err("无法锁定剪切板内存".into());
+        return Err({ let _ = GlobalFree(Some(handle)); "无法锁定剪切板内存".into() });
     }
     std::ptr::copy_nonoverlapping(bytes.as_ptr(), locked as *mut u8, bytes.len());
     let _ = GlobalUnlock(handle);
@@ -491,8 +527,8 @@ fn decode_dib(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     if i64::from(width_u) * i64::from(abs_height) > MAX_PIXELS {
         return None;
     }
-    let pixel_offset = if compression == 3 { header + 12 } else { header };
-    let row_bytes = ((bit_count as usize * width as usize + 31) / 32) * 4;
+    let pixel_offset = if compression == 3 && header == 40 { header + 12 } else { header };
+    let row_bytes = (bit_count as usize * width as usize).div_ceil(32) * 4;
     let needed = pixel_offset + row_bytes * abs_height as usize;
     if bytes.len() < needed {
         return None;
@@ -604,7 +640,7 @@ unsafe fn pixels_from_bitmap(bitmap: HBITMAP) -> Result<Option<(u32, u32, Vec<u8
     if lines == 0 {
         return Err("GetDIBits 返回 0 行".into());
     }
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel[3] = 255;
     }
     Ok(Some((width as u32, height as u32, pixels)))
@@ -703,5 +739,17 @@ mod tests {
         let (width, height, bgra) = decode_dib(&bytes).unwrap();
         assert_eq!((width, height), (1, 1));
         assert_eq!(bgra, vec![1, 2, 3, 255]);
+
+        let mut v5 = vec![0u8; 128];
+        v5[0..4].copy_from_slice(&124u32.to_le_bytes());
+        v5[4..8].copy_from_slice(&1i32.to_le_bytes());
+        v5[8..12].copy_from_slice(&1i32.to_le_bytes());
+        v5[12..14].copy_from_slice(&1u16.to_le_bytes());
+        v5[14..16].copy_from_slice(&32u16.to_le_bytes());
+        v5[16..20].copy_from_slice(&3u32.to_le_bytes());
+        v5[124..128].copy_from_slice(&[9, 8, 7, 0]);
+        let (w5, h5, bgra5) = decode_dib(&v5).unwrap();
+        assert_eq!((w5, h5), (1, 1));
+        assert_eq!(bgra5, vec![9, 8, 7, 255]);
     }
 }

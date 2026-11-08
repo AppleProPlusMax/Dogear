@@ -8,10 +8,34 @@ export type ParsedSearch = {
 };
 
 export type SearchClip = {
+  kind?: string;
   language: string | null;
   pinned: boolean;
   ocrText: string | null;
 };
+
+const TYPE_ALIASES: Record<string, string> = {
+  javascript: "js",
+  typescript: "ts",
+  py: "python",
+  sh: "shell",
+  bash: "shell",
+  zsh: "shell",
+  "c++": "cpp",
+  cxx: "cpp",
+  htm: "html",
+  url: "link",
+  img: "image",
+  pic: "image",
+  photo: "image",
+  txt: "text",
+  plain: "text",
+};
+
+function normalizeType(raw: string): string {
+  const lower = raw.toLowerCase();
+  return TYPE_ALIASES[lower] ?? lower;
+}
 
 /** 前缀只在整段搜索的开头生效。type:json 后面还可以跟要找的词。 */
 export function parseSearch(raw: string): ParsedSearch {
@@ -30,7 +54,7 @@ export function parseSearch(raw: string): ParsedSearch {
 function parseType(rest: string): ParsedSearch {
   const parts = rest.trim().split(/\s+/).filter(Boolean);
   return {
-    language: (parts[0] ?? "").toLowerCase(),
+    language: normalizeType(parts[0] ?? ""),
     ocrOnly: false,
     pinnedOnly: false,
     text: parts.slice(1).join(" ").toLowerCase(),
@@ -38,7 +62,11 @@ function parseType(rest: string): ParsedSearch {
 }
 
 export function clipMatches(clip: SearchClip, parsed: ParsedSearch, text: SearchText): boolean {
-  if (parsed.language && (clip.language ?? "").toLowerCase() !== parsed.language) return false;
+  if (parsed.language) {
+    const lang = (clip.language ?? "").toLowerCase();
+    const kind = (clip.kind ?? "").toLowerCase();
+    if (lang !== parsed.language && kind !== parsed.language) return false;
+  }
   if (parsed.pinnedOnly && !clip.pinned) return false;
   if (parsed.ocrOnly) {
     if (!parsed.text) return (clip.ocrText ?? "").trim().length > 0;

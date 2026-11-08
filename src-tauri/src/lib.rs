@@ -154,9 +154,11 @@ pub fn run() {
                         .unwrap_or((0, false, false));
                     // 截图层会抢走焦点。自动隐藏开着时，这次失焦不能当成用户离开。
                     if capturing {
+                        panel::release_escape(&blur_handle);
                         return;
                     }
                     if !auto_hide {
+                        panel::release_escape(&blur_handle);
                         return;
                     }
                     if state::now_ms() < until {

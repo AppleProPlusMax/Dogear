@@ -569,7 +569,7 @@ unsafe fn copy_screen(shot: &Shot) -> Result<Vec<u8>, String> {
     if lines == 0 {
         return Err("读不到截图像素".into());
     }
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel[3] = 255;
     }
     Ok(pixels)

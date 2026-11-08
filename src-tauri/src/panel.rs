@@ -76,6 +76,7 @@ fn set_escape(app: &AppHandle, enabled: bool) {
 }
 
 /// 窗口重新得到焦点（例如从任务栏还原）时重新占用 Esc。
+pub fn release_escape(app: &AppHandle) { set_escape(app, false); }
 pub fn hold_escape(app: &AppHandle) {
     set_escape(app, true);
 }

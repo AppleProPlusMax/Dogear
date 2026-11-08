@@ -734,6 +734,7 @@ function cycleFilter(backward: boolean) {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  if (event.isComposing || event.keyCode === 229 || settingsStore.guideOpen) return;
   if (imageOpen.value) {
     if (event.key === "Escape") closeImage();
     event.preventDefault();
@@ -799,6 +800,7 @@ watch(
 );
 
 function onEscape(event: KeyboardEvent) {
+  if (event.isComposing || event.keyCode === 229) return;
   if (event.key !== "Escape") return;
   if (imageOpen.value) {
     event.preventDefault();

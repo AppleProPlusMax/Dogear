@@ -232,7 +232,7 @@ fn load_and_prune(
     }
 
     let pinned_count = present.iter().filter(|clip| clip.pinned).count();
-    let unpinned_limit = limit.saturating_sub(pinned_count);
+    let unpinned_limit = limit.saturating_sub(pinned_count).max(usize::from(limit > 0));
     let mut unpinned_kept = 0usize;
 
     for clip in present {

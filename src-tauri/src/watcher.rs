@@ -341,7 +341,7 @@ fn trim_history(guard: &mut AppState) -> (Vec<i64>, Vec<String>) {
     }
     let mut removed = Vec::new();
     let mut index = guard.clips.len();
-    while index > 0 && need > 0 {
+    while index > 1 && need > 0 {
         index -= 1;
         if guard.clips[index].pinned {
             continue;
@@ -489,5 +489,11 @@ mod tests {
         assert!(ids.contains(&kept));
         assert!(ids.contains(&newest));
         assert!(guard.clips.iter().any(|clip| clip.id == kept && clip.pinned));
+
+        guard.clips.iter_mut().find(|clip| clip.id == newest).unwrap().pinned = true;
+        let fresh = store(&mut guard, "fresh", 4);
+        assert_eq!(guard.clips[0].id, fresh);
+        assert!(guard.clips.iter().any(|clip| clip.id == kept));
+        assert!(guard.clips.iter().any(|clip| clip.id == newest));
     }
 }

@@ -113,10 +113,14 @@ pub fn update(app: &AppHandle, patch: SettingsPatch) -> Result<Settings, String>
     let next = merge(current.clone(), patch)?;
 
     if next.summon_shortcut != current.summon_shortcut || next.capture_shortcut != current.capture_shortcut {
-        sync_shortcuts(app, &current, &next).map_err(|err| {
-            let _ = register_user_shortcuts(app, &current);
-            err
-        })?;
+        sync_shortcuts(app, &current, &next).inspect_err(|_| { let _ = register_user_shortcuts(app, &current); })?;
+
+
+
+
+
+
+
     }
     if next.launch_at_login != current.launch_at_login {
         if let Err(err) = apply_launch(app, next.launch_at_login) {
@@ -562,6 +566,10 @@ fn unregister_user_shortcuts(app: &AppHandle, settings: &Settings) -> Result<(),
 }
 
 fn apply_launch(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    if cfg!(debug_assertions) {
+        let _ = (app, enabled);
+        return Ok(());
+    }
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let (key, _) = hkcu
         .create_subkey(AUTOSTART_RUN_KEY)
@@ -669,8 +677,8 @@ mod tests {
 
     #[test]
     fn auto_hide_turns_pin_off() {
-        let mut current = Settings::default();
-        current.pinned = true;
+        let current = Settings { pinned: true, ..Settings::default() };
+
         let next = merge(
             current,
             SettingsPatch {
@@ -682,10 +690,10 @@ mod tests {
         assert!(next.auto_hide);
         assert!(!next.pinned);
 
-        let mut loaded = Settings::default();
-        loaded.auto_hide = true;
-        loaded.pinned = true;
-        assert!(!normalize_loaded(loaded).pinned);
+        assert!(!normalize_loaded(Settings { auto_hide: true, pinned: true, ..Settings::default() }).pinned);
+
+
+
     }
 
     #[test]
@@ -726,8 +734,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(next.history_limit, 500);
-        let mut loaded = Settings::default();
-        loaded.history_limit = 0;
+        assert!(!normalize_loaded(Settings { auto_hide: true, pinned: true, ..Settings::default() }).pinned);
+        let loaded = Settings { history_limit: 0, ..Settings::default() };
         assert_eq!(normalize_loaded(loaded).history_limit, 200);
     }
 
