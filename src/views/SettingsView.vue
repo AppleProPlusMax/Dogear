@@ -63,6 +63,13 @@ const themes = computed(() => [
   { id: "dark" as const, label: t("themeDark") },
 ]);
 
+const windowPositions = computed(() => [
+  { id: "cursor" as const, label: t("posCursor") },
+  { id: "center" as const, label: t("posCenter") },
+  { id: "bottom-right" as const, label: t("posBottomRight") },
+  { id: "remember" as const, label: t("posRemember") },
+]);
+
 const summonParts = computed(() => store.settings.summonShortcut.split("+"));
 const captureParts = computed(() => store.settings.captureShortcut.split("+"));
 
@@ -263,6 +270,25 @@ onUnmounted(() => {
           >
             <span></span>
           </button>
+        </div>
+        <div class="row">
+          <div>
+            <div class="label">{{ t("windowPosition") }}</div>
+            <p>{{ t("windowPositionHint") }}</p>
+          </div>
+          <div class="seg" role="radiogroup" :aria-label="t('windowPosition')">
+            <button
+              v-for="item in windowPositions"
+              :key="item.id"
+              type="button"
+              role="radio"
+              :aria-checked="store.settings.windowPosition === item.id"
+              :class="{ on: store.settings.windowPosition === item.id }"
+              @click="store.setWindowPosition(item.id)"
+            >
+              {{ item.label }}
+            </button>
+          </div>
         </div>
         <div class="row">
           <div>

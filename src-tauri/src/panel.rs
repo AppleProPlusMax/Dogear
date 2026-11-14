@@ -141,6 +141,11 @@ pub fn hide(app: &AppHandle) {
     set_search_nonempty(false);
     set_escape(app, false);
     if let Some(window) = app.get_webview_window("main") {
+        if window.is_visible().unwrap_or(false) {
+            if let Ok(pos) = window.outer_position() {
+                crate::settings::save_window_position(app, pos.x, pos.y);
+            }
+        }
         let _ = window.hide();
     }
     crate::settings::abort_shortcut_capture(app);
@@ -253,7 +258,7 @@ fn focus_window(window: &tauri::WebviewWindow) {
 
 fn present(app: &AppHandle, window: &tauri::WebviewWindow, announce_history: bool) {
     arm_blur_grace(app);
-    position_near_cursor(window);
+    position_window(app, window);
     let _ = window.show();
     focus_window(window);
     let _ = window.set_focus();
@@ -568,20 +573,128 @@ fn clip_file(
     path.map(std::path::PathBuf::from).ok_or_else(|| "这条记录没有图片".into())
 }
 
-fn position_near_cursor(window: &tauri::WebviewWindow) {
+fn cursor_pos() -> Option<POINT> {
     let mut point = POINT::default();
-    if unsafe { GetCursorPos(&mut point) }.is_err() {
+    if unsafe { GetCursorPos(&mut point) }.is_ok() {
+        Some(point)
+    } else {
+        None
+    }
+}
+
+fn active_monitor(window: &tauri::WebviewWindow) -> Option<tauri::Monitor> {
+    if let Some(point) = cursor_pos() {
+        if let Ok(Some(monitor)) = window.monitor_from_point(point.x as f64, point.y as f64) {
+            return Some(monitor);
+        }
+    }
+    window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten())
+}
+
+fn clamp_to_monitor(
+    window: &tauri::WebviewWindow,
+    monitor: Option<tauri::Monitor>,
+    x: i32,
+    y: i32,
+) -> (i32, i32) {
+    let Some(monitor) = monitor else {
+        return (x, y);
+    };
+    let area = monitor.work_area();
+    let win = window
+        .outer_size()
+        .unwrap_or(tauri::PhysicalSize::new(780, 640));
+    let max_x = area.position.x + area.size.width as i32 - win.width as i32;
+    let max_y = area.position.y + area.size.height as i32 - win.height as i32;
+    (
+        x.clamp(area.position.x, max_x.max(area.position.x)),
+        y.clamp(area.position.y, max_y.max(area.position.y)),
+    )
+}
+
+fn center_in_monitor(window: &tauri::WebviewWindow, monitor: Option<tauri::Monitor>) {
+    let Some(monitor) = monitor else {
+        let _ = window.center();
         return;
-    }
-    let mut x = point.x;
-    let mut y = point.y + 12;
-    if let Ok(Some(monitor)) = window.monitor_from_point(x as f64, y as f64) {
-        let area = monitor.work_area();
-        let win = window.outer_size().unwrap_or(tauri::PhysicalSize::new(780, 640));
-        let max_x = area.position.x + area.size.width as i32 - win.width as i32;
-        let max_y = area.position.y + area.size.height as i32 - win.height as i32;
-        x = x.clamp(area.position.x, max_x.max(area.position.x));
-        y = y.clamp(area.position.y, max_y.max(area.position.y));
-    }
+    };
+    let area = monitor.work_area();
+    let win = window
+        .outer_size()
+        .unwrap_or(tauri::PhysicalSize::new(780, 640));
+    let raw_x = area.position.x + (area.size.width as i32 - win.width as i32) / 2;
+    let raw_y = area.position.y + (area.size.height as i32 - win.height as i32) / 2;
+    let (x, y) = clamp_to_monitor(window, Some(monitor), raw_x, raw_y);
     let _ = window.set_position(PhysicalPosition::new(x, y));
+}
+
+fn position_near_cursor(window: &tauri::WebviewWindow) {
+    let Some(point) = cursor_pos() else {
+        return;
+    };
+    let raw_x = point.x;
+    let raw_y = point.y + 12;
+    let monitor = window
+        .monitor_from_point(raw_x as f64, raw_y as f64)
+        .ok()
+        .flatten();
+    let (x, y) = clamp_to_monitor(window, monitor, raw_x, raw_y);
+    let _ = window.set_position(PhysicalPosition::new(x, y));
+}
+
+fn position_bottom_right(window: &tauri::WebviewWindow) {
+    const EDGE_MARGIN: i32 = 16;
+    let Some(monitor) = active_monitor(window) else {
+        return;
+    };
+    let area = monitor.work_area();
+    let win = window
+        .outer_size()
+        .unwrap_or(tauri::PhysicalSize::new(780, 640));
+    let raw_x = area.position.x + area.size.width as i32 - win.width as i32 - EDGE_MARGIN;
+    let raw_y = area.position.y + area.size.height as i32 - win.height as i32 - EDGE_MARGIN;
+    let (x, y) = clamp_to_monitor(window, Some(monitor), raw_x, raw_y);
+    let _ = window.set_position(PhysicalPosition::new(x, y));
+}
+
+fn position_remembered(
+    window: &tauri::WebviewWindow,
+    saved: (Option<i32>, Option<i32>),
+) {
+    let (Some(raw_x), Some(raw_y)) = saved else {
+        center_in_monitor(window, active_monitor(window));
+        return;
+    };
+    let monitor = window
+        .monitor_from_point(raw_x as f64, raw_y as f64)
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten());
+    let (x, y) = clamp_to_monitor(window, monitor, raw_x, raw_y);
+    let _ = window.set_position(PhysicalPosition::new(x, y));
+}
+
+fn position_window(app: &AppHandle, window: &tauri::WebviewWindow) {
+    let (mode, last_x, last_y) = app
+        .try_state::<Mutex<AppState>>()
+        .and_then(|state| {
+            state.lock().ok().map(|guard| {
+                (
+                    guard.settings.window_position.clone(),
+                    guard.settings.last_window_x,
+                    guard.settings.last_window_y,
+                )
+            })
+        })
+        .unwrap_or_else(|| ("center".into(), None, None));
+
+    match mode.as_str() {
+        "center" => center_in_monitor(window, active_monitor(window)),
+        "bottom-right" => position_bottom_right(window),
+        "remember" => position_remembered(window, (last_x, last_y)),
+        _ => position_near_cursor(window),
+    }
 }

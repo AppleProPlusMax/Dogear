@@ -41,6 +41,12 @@ pub struct Settings {
     /// 在列表和预览里显示复制来源。旧配置没有这一项时默认显示。
     #[serde(default = "default_show_source")]
     pub show_source: bool,
+    /// 快捷键呼出时窗口的位置：cursor / center / bottom-right / remember。
+    #[serde(default = "default_window_position")]
+    pub window_position: String,
+    /// 记住上次位置模式下保存的窗口坐标。
+    pub last_window_x: Option<i32>,
+    pub last_window_y: Option<i32>,
 }
 
 impl Default for Settings {
@@ -60,6 +66,9 @@ impl Default for Settings {
             ignored_apps: Vec::new(),
             history_limit: crate::watcher::HISTORY_LIMIT as u32,
             show_source: true,
+            window_position: default_window_position(),
+            last_window_x: None,
+            last_window_y: None,
         }
     }
 }
@@ -81,6 +90,7 @@ pub struct SettingsPatch {
     pub ignored_apps: Option<Vec<String>>,
     pub history_limit: Option<u32>,
     pub show_source: Option<bool>,
+    pub window_position: Option<String>,
 }
 
 pub fn load() -> Settings {
@@ -286,6 +296,9 @@ fn merge(current: Settings, patch: SettingsPatch) -> Result<Settings, String> {
     if let Some(show) = patch.show_source {
         next.show_source = show;
     }
+    if let Some(pos) = patch.window_position {
+        next.window_position = normalize_window_position(&pos, &next.language)?;
+    }
     let lang = next.language.clone();
     if let Some(shortcut) = patch.summon_shortcut {
         next.summon_shortcut = normalize_shortcut(&shortcut, &lang)?;
@@ -336,6 +349,9 @@ fn normalize_loaded(mut settings: Settings) -> Settings {
     if normalize_theme(&settings.theme).is_err() {
         settings.theme = "system".into();
     }
+    if normalize_window_position(&settings.window_position, "zh-CN").is_err() {
+        settings.window_position = default_window_position();
+    }
     if normalize_language(&settings.language).is_err() {
         settings.language = "zh-CN".into();
     }
@@ -358,6 +374,44 @@ fn normalize_theme(theme: &str) -> Result<String, String> {
 
 fn default_show_source() -> bool {
     true
+}
+
+fn default_window_position() -> String {
+    "center".into()
+}
+
+fn normalize_window_position(position: &str, lang: &str) -> Result<String, String> {
+    match position {
+        "cursor" | "center" | "bottom-right" | "remember" => Ok(position.to_string()),
+        _ => Err(say(
+            lang,
+            "呼出位置只能是跟随鼠标、屏幕居中、屏幕右下角或记住上次位置",
+            "Window position must be cursor, center, bottom-right, or remember",
+        )),
+    }
+}
+
+pub fn save_window_position(app: &AppHandle, x: i32, y: i32) {
+    let Some(state) = app.try_state::<std::sync::Mutex<AppState>>() else {
+        return;
+    };
+    let updated = {
+        let Ok(mut guard) = state.lock() else {
+            return;
+        };
+        if guard.settings.window_position != "remember" {
+            return;
+        }
+        if guard.settings.last_window_x == Some(x) && guard.settings.last_window_y == Some(y) {
+            return;
+        }
+        guard.settings.last_window_x = Some(x);
+        guard.settings.last_window_y = Some(y);
+        guard.settings.clone()
+    };
+    if let Err(err) = save(&updated) {
+        eprintln!("窗口位置保存失败: {err}");
+    }
 }
 
 fn require_history_limit(value: u32, lang: &str) -> Result<u32, String> {
@@ -757,5 +811,38 @@ mod tests {
         let product = autostart_value_names("Dogear");
         assert_eq!(product.write, "Dogear");
         assert!(product.remove.iter().all(|name| !name.eq_ignore_ascii_case("Dogear")));
+    }
+
+    #[test]
+    fn window_position_only_allows_supported_modes() {
+        let missing: Settings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
+        assert_eq!(missing.window_position, "center");
+
+        let err = merge(
+            Settings::default(),
+            SettingsPatch {
+                window_position: Some("top-left".into()),
+                ..SettingsPatch::default()
+            },
+        );
+        assert!(err.is_err());
+
+        for mode in ["cursor", "center", "bottom-right", "remember"] {
+            let next = merge(
+                Settings::default(),
+                SettingsPatch {
+                    window_position: Some(mode.into()),
+                    ..SettingsPatch::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(next.window_position, mode);
+        }
+
+        let invalid_loaded = Settings {
+            window_position: "unknown".into(),
+            ..Settings::default()
+        };
+        assert_eq!(normalize_loaded(invalid_loaded).window_position, "center");
     }
 }

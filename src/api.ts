@@ -138,6 +138,7 @@ export function getEffectState(): Promise<EffectState> {
 }
 
 export type ThemePreference = "system" | "light" | "dark";
+export type WindowPosition = "cursor" | "center" | "bottom-right" | "remember";
 export type AppLocale = "zh-CN" | "en";
 
 export interface Settings {
@@ -155,6 +156,7 @@ export interface Settings {
   ignoredApps: string[];
   historyLimit: 200 | 500 | 1000;
   showSource: boolean;
+  windowPosition: WindowPosition;
 }
 
 export type SettingsPatch = Partial<Settings>;

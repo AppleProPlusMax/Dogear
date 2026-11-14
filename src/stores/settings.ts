@@ -10,6 +10,7 @@ import {
   type Settings,
   type SettingsPatch,
   type ThemePreference,
+  type WindowPosition,
 } from "../api";
 import { applyLocale } from "../i18n";
 
@@ -28,6 +29,7 @@ const defaults: Settings = {
   ignoredApps: [],
   historyLimit: 200,
   showSource: true,
+  windowPosition: "center",
 };
 
 export type ShortcutField = "summon" | "capture";
@@ -97,6 +99,11 @@ export const useSettingsStore = defineStore("settings", () => {
     await update({ theme });
   }
 
+  async function setWindowPosition(windowPosition: WindowPosition) {
+    if (settings.value.windowPosition === windowPosition) return;
+    await update({ windowPosition });
+  }
+
   async function startCapture(field: ShortcutField) {
     error.value = "";
     capturing.value = field;
@@ -152,6 +159,7 @@ export const useSettingsStore = defineStore("settings", () => {
     load,
     update,
     setTheme,
+    setWindowPosition,
     setLanguage,
     startCapture,
     commitCapture,
