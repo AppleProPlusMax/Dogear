@@ -113,6 +113,7 @@ const colors = ref<FoundColor[]>([]);
 let previewToken = 0;
 let colorToken = 0;
 const searchEl = ref<HTMLInputElement | null>(null);
+const panelEl = ref<HTMLElement | null>(null);
 /// 图片以 data URL 取回，按条目缓存，避免每次切换选中都重新读盘。
 const thumbs = ref<Record<number, string>>({});
 const thumbMiss = new Set<number>();
@@ -725,7 +726,11 @@ function onViewerPointerUp(event: PointerEvent) {
   }, 0);
 }
 
+function focusPanel() { panelEl.value?.focus({ preventScroll: true }); }
+function selectFilter(id: FilterId) { filter.value = id; selected.value = 0; focusPanel(); }
+function selectItem(index: number) { selected.value = index; focusPanel(); }
 function cycleFilter(backward: boolean) {
+  if (document.activeElement !== searchEl.value) focusPanel();
   const ids = filters.value.map((item) => item.id);
   const index = Math.max(0, ids.indexOf(filter.value));
   const step = backward ? -1 : 1;
@@ -746,10 +751,12 @@ function onKeydown(event: KeyboardEvent) {
     return;
   }
   if (event.key === "ArrowDown") {
+    if (document.activeElement !== searchEl.value) focusPanel();
     event.preventDefault();
     if (filtered.value.length === 0) return;
     selected.value = (selected.value + 1) % filtered.value.length;
   } else if (event.key === "ArrowUp") {
+    if (document.activeElement !== searchEl.value) focusPanel();
     event.preventDefault();
     if (filtered.value.length === 0) return;
     selected.value = (selected.value - 1 + filtered.value.length) % filtered.value.length;
@@ -1028,7 +1035,7 @@ onUnmounted(() => {
 
 <template>
   <SettingsView v-if="view === 'settings'" @back="showHistory" />
-  <main v-else class="panel" @keydown="onKeydown">
+  <main v-else ref="panelEl" class="panel" tabindex="-1" @keydown="onKeydown">
     <header class="top" data-tauri-drag-region>
       <div class="brand" data-tauri-drag-region>
         <img :src="markUrl" alt="" />
@@ -1102,7 +1109,7 @@ onUnmounted(() => {
             role="tab"
             :class="{ on: filter === item.id }"
             :aria-selected="filter === item.id"
-            @click="filter = item.id; selected = 0"
+            @click="selectFilter(item.id)"
           >
             {{ item.label }} <em>{{ countOf(item.id) }}</em>
           </button>
@@ -1123,7 +1130,7 @@ onUnmounted(() => {
                 type="button"
                 class="item"
                 :class="{ on: row.index === selected, kept: row.clip.pinned }"
-                @click="selected = row.index"
+                @click="selectItem(row.index)"
                 @dblclick="pasteSelected($event.shiftKey)"
               >
                 <span v-if="thumbs[row.clip.id]" class="tile shot">
@@ -1388,6 +1395,7 @@ onUnmounted(() => {
   overflow: hidden;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
 }
+.panel:focus, .seg button:focus-visible, .item:focus-visible { outline: none; }
 .top {
   padding: 14px 20px 0;
   cursor: grab;
