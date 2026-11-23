@@ -376,9 +376,23 @@ unsafe fn alloc_global_unused(bytes: &[u8]) -> Result<HGLOBAL, String> {
 
 /// CF_DIB 的 alpha 通道在各家软件里表现不一致，所以先把半透明合成到白底。
 fn build_dib(width: u32, height: u32, bgra: &[u8]) -> Result<Vec<u8>, String> {
+    if width == 0 || height == 0 {
+        return Err("图片尺寸为 0".into());
+    }
     let header_size = std::mem::size_of::<BITMAPINFOHEADER>();
-    let row = width as usize * 4;
-    let mut out = vec![0u8; header_size + row * height as usize];
+    let row = (width as usize)
+        .checked_mul(4)
+        .ok_or_else(|| "图片尺寸溢出".to_string())?;
+    let pixel_bytes = row
+        .checked_mul(height as usize)
+        .ok_or_else(|| "图片尺寸溢出".to_string())?;
+    if bgra.len() < pixel_bytes {
+        return Err("图片像素数据不完整".into());
+    }
+    let total_size = header_size
+        .checked_add(pixel_bytes)
+        .ok_or_else(|| "图片尺寸溢出".to_string())?;
+    let mut out = vec![0u8; total_size];
 
     let header = BITMAPINFOHEADER {
         biSize: header_size as u32,
@@ -665,29 +679,18 @@ unsafe fn read_global(format: u32) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-unsafe fn read_unicode() -> ClipboardRead {
-    let Ok(handle) = GetClipboardData(CF_UNICODETEXT) else {
-        return ClipboardRead::Empty;
-    };
-    if handle.is_invalid() {
-        return ClipboardRead::Empty;
-    }
-    let locked = GlobalLock(windows::Win32::Foundation::HGLOBAL(handle.0));
-    if locked.is_null() {
-        return ClipboardRead::Empty;
-    }
-    let ptr = locked as *const u16;
+fn decode_unicode_units(units: &[u16]) -> ClipboardRead {
     let mut len = 0usize;
-    while *ptr.add(len) != 0 {
+    while len < units.len() && units[len] != 0 {
         len += 1;
         if len > MAX_CHARS {
-            let _ = GlobalUnlock(windows::Win32::Foundation::HGLOBAL(handle.0));
             return ClipboardRead::Ignored;
         }
     }
-    let slice = std::slice::from_raw_parts(ptr, len);
-    let text = String::from_utf16_lossy(slice);
-    let _ = GlobalUnlock(windows::Win32::Foundation::HGLOBAL(handle.0));
+    if len == 0 {
+        return ClipboardRead::Empty;
+    }
+    let text = String::from_utf16_lossy(&units[..len]);
     if text.is_empty() {
         ClipboardRead::Empty
     } else {
@@ -695,9 +698,32 @@ unsafe fn read_unicode() -> ClipboardRead {
     }
 }
 
+unsafe fn read_unicode() -> ClipboardRead {
+    let Ok(handle) = GetClipboardData(CF_UNICODETEXT) else {
+        return ClipboardRead::Empty;
+    };
+    if handle.is_invalid() {
+        return ClipboardRead::Empty;
+    }
+    let global = HGLOBAL(handle.0);
+    let byte_size = windows::Win32::System::Memory::GlobalSize(global);
+    let unit_cap = byte_size / std::mem::size_of::<u16>();
+    if unit_cap == 0 {
+        return ClipboardRead::Empty;
+    }
+    let locked = GlobalLock(global);
+    if locked.is_null() {
+        return ClipboardRead::Empty;
+    }
+    let units = std::slice::from_raw_parts(locked as *const u16, unit_cap);
+    let result = decode_unicode_units(units);
+    let _ = GlobalUnlock(global);
+    result
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{decode_dib, pick_source};
+    use super::{build_dib, decode_dib, decode_unicode_units, pick_source, ClipboardRead, MAX_CHARS};
 
     #[test]
     fn system_broker_is_not_the_copy_source() {
@@ -751,5 +777,32 @@ mod tests {
         let (w5, h5, bgra5) = decode_dib(&v5).unwrap();
         assert_eq!((w5, h5), (1, 1));
         assert_eq!(bgra5, vec![9, 8, 7, 255]);
+    }
+
+    #[test]
+    fn unicode_buffer_stops_at_slice_end_without_null_terminator() {
+        assert!(matches!(decode_unicode_units(&[]), ClipboardRead::Empty));
+        assert!(matches!(decode_unicode_units(&[0, 65]), ClipboardRead::Empty));
+        let non_terminated: Vec<u16> = "hello".encode_utf16().collect();
+        match decode_unicode_units(&non_terminated) {
+            ClipboardRead::Text(text) => assert_eq!(text, "hello"),
+            _ => panic!("expected text"),
+        }
+        let with_null: Vec<u16> = "hi\0ignored".encode_utf16().collect();
+        match decode_unicode_units(&with_null) {
+            ClipboardRead::Text(text) => assert_eq!(text, "hi"),
+            _ => panic!("expected text"),
+        }
+        let too_long = vec![b'a' as u16; MAX_CHARS + 1];
+        assert!(matches!(decode_unicode_units(&too_long), ClipboardRead::Ignored));
+    }
+
+    #[test]
+    fn build_dib_rejects_short_or_empty_buffers() {
+        assert!(build_dib(0, 1, &[]).is_err());
+        assert!(build_dib(2, 2, &[0u8; 12]).is_err());
+        let dib = build_dib(1, 1, &[0, 0, 0, 0]).unwrap();
+        assert_eq!(dib.len(), 44);
+        assert_eq!(&dib[40..44], &[255, 255, 255, 255]);
     }
 }

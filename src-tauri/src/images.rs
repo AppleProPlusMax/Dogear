@@ -93,8 +93,15 @@ pub fn decode(png: &[u8]) -> Result<Decoded, String> {
     if width == 0 || height == 0 {
         return Err("图片尺寸为 0".into());
     }
+    let transform = BitmapTransform::new().map_err(|err| err.to_string())?;
     let provider = decoder
-        .GetPixelDataAsync()
+        .GetPixelDataTransformedAsync(
+            BitmapPixelFormat::Bgra8,
+            BitmapAlphaMode::Straight,
+            &transform,
+            ExifOrientationMode::IgnoreExifOrientation,
+            ColorManagementMode::DoNotColorManage,
+        )
         .map_err(|err| err.to_string())?
         .get()
         .map_err(|err| format!("读取像素失败: {err}"))?;
@@ -102,6 +109,13 @@ pub fn decode(png: &[u8]) -> Result<Decoded, String> {
         .DetachPixelData()
         .map_err(|err| err.to_string())?
         .to_vec();
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| "图片尺寸溢出".to_string())?;
+    if bgra.len() < expected {
+        return Err("图片像素数据不完整".into());
+    }
     Ok(Decoded {
         width,
         height,
@@ -422,13 +436,28 @@ mod tests {
             0, 0, 255, 255, // 蓝
             0, 255, 0, 255, // 绿
             255, 0, 0, 255, // 红
-            255, 255, 255, 255,
+            100, 150, 200, 128, // 半透明 Straight alpha
         ];
         let png = encode(2, 2, &bgra).expect("编码应当成功");
         assert_eq!(&png[1..4], b"PNG");
         let decoded = decode(&png).expect("解码应当成功");
         assert_eq!((decoded.width, decoded.height), (2, 2));
         assert_eq!(decoded.bgra, bgra);
+    }
+
+    #[test]
+    fn decode_normalizes_grayscale_png_to_bgra8() {
+        // 1x1 8-bit grayscale PNG (pixel value = 0x80)
+        const GRAY_1X1_PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00,
+            0x00, 0x3A, 0x7E, 0x9B, 0x55, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x68, 0x00, 0x00, 0x00, 0x82, 0x00, 0x81, 0x77, 0xCD, 0x72, 0xB6, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let decoded = decode(GRAY_1X1_PNG).expect("灰度 PNG 应自动转为 BGRA8");
+        assert_eq!((decoded.width, decoded.height), (1, 1));
+        assert_eq!(decoded.bgra, vec![0x80, 0x80, 0x80, 0xFF]);
     }
 
     #[test]

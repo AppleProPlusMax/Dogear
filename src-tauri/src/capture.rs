@@ -1,5 +1,6 @@
 //! 区域截图。盖住整块虚拟屏幕让用户拖一块，松手后把那一块存进历史并放上剪切板。
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -41,6 +42,7 @@ const EDGE: u32 = u32::from_le_bytes([0xf0, 0x5a, 0x4a, 0xff]);
 
 static BUSY: AtomicBool = AtomicBool::new(false);
 
+#[derive(Clone, Copy)]
 struct Shot {
     x: i32,
     y: i32,
@@ -55,10 +57,11 @@ struct Overlay {
     height: i32,
     pixels: *mut u32,
     mem_dc: HDC,
-    dragging: bool,
-    anchor: (i32, i32),
-    cursor: (i32, i32),
-    shot: Option<Shot>,
+    dragging: Cell<bool>,
+    painting: Cell<bool>,
+    anchor: Cell<(i32, i32)>,
+    cursor: Cell<(i32, i32)>,
+    shot: Cell<Option<Shot>>,
 }
 
 #[tauri::command]
@@ -82,16 +85,14 @@ pub fn begin(app: &AppHandle) {
             thread::sleep(Duration::from_millis(60));
         }
 
-        let outcome = std::panic::catch_unwind(|| unsafe { select_region() });
-        match outcome {
-            Ok(Ok(Some(shot))) => {
+        match unsafe { select_region() } {
+            Ok(Some(shot)) => {
                 if let Err(err) = grab_and_store(&app, &shot) {
                     eprintln!("截图保存失败: {err}");
                 }
             }
-            Ok(Ok(None)) => {}
-            Ok(Err(err)) => eprintln!("截图失败: {err}"),
-            Err(_) => eprintln!("截图中断"),
+            Ok(None) => {}
+            Err(err) => eprintln!("截图失败: {err}"),
         }
         restore_panel(&app, plan);
         BUSY.store(false, Ordering::SeqCst);
@@ -226,10 +227,11 @@ unsafe fn select_region() -> Result<Option<Shot>, String> {
         height,
         pixels: bits as *mut u32,
         mem_dc,
-        dragging: false,
-        anchor: (0, 0),
-        cursor: (0, 0),
-        shot: None,
+        dragging: Cell::new(false),
+        painting: Cell::new(false),
+        anchor: Cell::new((0, 0)),
+        cursor: Cell::new((0, 0)),
+        shot: Cell::new(None),
     });
     let overlay = Box::into_raw(overlay);
 
@@ -265,14 +267,15 @@ unsafe fn select_region() -> Result<Option<Shot>, String> {
     let _ = SetTimer(Some(hwnd), 1, 40, None);
 
     let mut message = MSG::default();
-    while GetMessageW(&mut message, None, 0, 0).0 != 0 {
+    while GetMessageW(&mut message, None, 0, 0).0 > 0 {
         let _ = TranslateMessage(&message);
         DispatchMessageW(&message);
     }
 
     let _ = ShowWindow(hwnd, SW_HIDE);
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
     let _ = DestroyWindow(hwnd);
-    let mut overlay = Box::from_raw(overlay);
+    let overlay = Box::from_raw(overlay);
     let shot = overlay.shot.take();
     drop(overlay);
     SelectObject(mem_dc, previous);
@@ -286,6 +289,9 @@ unsafe fn select_region() -> Result<Option<Shot>, String> {
 
 impl Overlay {
     fn present(&self, hwnd: HWND) {
+        if self.painting.replace(true) {
+            return;
+        }
         paint(self);
         let dst = POINT {
             x: self.origin_x,
@@ -315,6 +321,7 @@ impl Overlay {
                 ULW_ALPHA,
             );
         }
+        self.painting.set(false);
     }
 }
 
@@ -322,10 +329,10 @@ fn paint(overlay: &Overlay) {
     let count = (overlay.width as usize) * (overlay.height as usize);
     let pixels = unsafe { std::slice::from_raw_parts_mut(overlay.pixels, count) };
     pixels.fill(DIM);
-    let Some(rect) = local_rect(overlay.anchor, overlay.cursor) else {
+    let Some(rect) = local_rect(overlay.anchor.get(), overlay.cursor.get()) else {
         return;
     };
-    if !overlay.dragging && overlay.shot.is_none() {
+    if !overlay.dragging.get() && overlay.shot.get().is_none() {
         return;
     }
     fill_rect(pixels, overlay.width, rect.0, rect.1, rect.2, rect.3, 0);
@@ -408,11 +415,11 @@ fn accepted(anchor: (i32, i32), cursor: (i32, i32)) -> Option<(i32, i32, i32, i3
 }
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    let raw = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Overlay;
+    let raw = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Overlay;
     if raw.is_null() {
         return DefWindowProcW(hwnd, msg, wparam, lparam);
     }
-    let overlay = &mut *raw;
+    let overlay = &*raw;
 
     if msg == WM_SETCURSOR {
         let _ = SetCursor(Some(LoadCursorW(None, IDC_CROSS).unwrap_or_default()));
@@ -432,23 +439,23 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     }
     if msg == WM_LBUTTONDOWN {
         let point = client_point(lparam);
-        overlay.dragging = true;
-        overlay.anchor = point;
-        overlay.cursor = point;
+        overlay.dragging.set(true);
+        overlay.anchor.set(point);
+        overlay.cursor.set(point);
         let _ = SetCapture(hwnd);
         overlay.present(hwnd);
         return LRESULT(0);
     }
-    if msg == WM_MOUSEMOVE && overlay.dragging {
-        overlay.cursor = client_point(lparam);
+    if msg == WM_MOUSEMOVE && overlay.dragging.get() {
+        overlay.cursor.set(client_point(lparam));
         overlay.present(hwnd);
         return LRESULT(0);
     }
-    if msg == WM_LBUTTONUP && overlay.dragging {
-        overlay.dragging = false;
-        overlay.cursor = client_point(lparam);
+    if msg == WM_LBUTTONUP && overlay.dragging.get() {
+        overlay.dragging.set(false);
+        overlay.cursor.set(client_point(lparam));
         let _ = ReleaseCapture();
-        let shot = accepted(overlay.anchor, overlay.cursor).and_then(|(x, y, w, h)| {
+        let shot = accepted(overlay.anchor.get(), overlay.cursor.get()).and_then(|(x, y, w, h)| {
             let x = x.max(0);
             let y = y.max(0);
             if x >= overlay.width || y >= overlay.height {
@@ -472,8 +479,8 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
-fn finish(hwnd: HWND, overlay: &mut Overlay, shot: Option<Shot>) {
-    overlay.shot = shot;
+fn finish(hwnd: HWND, overlay: &Overlay, shot: Option<Shot>) {
+    overlay.shot.set(shot);
     unsafe { PostQuitMessage(0) };
     let _ = hwnd;
 }

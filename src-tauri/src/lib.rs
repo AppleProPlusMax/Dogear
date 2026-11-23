@@ -27,11 +27,6 @@ fn get_effect_state(state: tauri::State<'_, Mutex<AppState>>) -> Result<effects:
 }
 
 #[tauri::command]
-fn ocr_image(path: String) -> Result<ocr::OcrReport, String> {
-    ocr::recognize_png(std::path::Path::new(&path))
-}
-
-#[tauri::command]
 fn get_settings(state: tauri::State<'_, Mutex<AppState>>) -> Result<Settings, String> {
     let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
     Ok(guard.settings.clone())
@@ -87,8 +82,7 @@ pub fn run() {
             get_settings,
             update_settings,
             begin_shortcut_capture,
-            end_shortcut_capture,
-            ocr_image
+            end_shortcut_capture
         ])
         .setup(|app| {
             let window = app
