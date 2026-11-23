@@ -10,6 +10,15 @@ use tauri::{AppHandle, Manager};
 use crate::state::Clip;
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
+/// 串行化「改内存 AppState + 写 SQLite」复合操作，确保并发删除/收藏/记录与落库顺序一致。
+/// 锁序固定为：MUTATION -> AppState（释放） -> DB（释放），避免死锁且不阻塞只读查询。
+static MUTATION: Mutex<()> = Mutex::new(());
+
+pub(crate) fn lock_mutation() -> std::sync::MutexGuard<'static, ()> {
+    MUTATION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 pub struct LoadedHistory {
     pub clips: Vec<Clip>,
@@ -231,14 +240,12 @@ fn load_and_prune(
         present.push(clip);
     }
 
-    let pinned_count = present.iter().filter(|clip| clip.pinned).count();
-    let unpinned_limit = limit.saturating_sub(pinned_count).max(usize::from(limit > 0));
     let mut unpinned_kept = 0usize;
 
     for clip in present {
         let keep = if clip.pinned {
             true
-        } else if unpinned_kept < unpinned_limit {
+        } else if unpinned_kept < limit {
             unpinned_kept += 1;
             true
         } else {

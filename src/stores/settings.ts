@@ -66,14 +66,21 @@ export const useSettingsStore = defineStore("settings", () => {
     }
     if (!listening && "__TAURI_INTERNALS__" in window) {
       listening = true;
-      await listen<Settings>("settings-changed", (event) => {
-        settings.value = event.payload;
-        applyTheme(event.payload.theme);
-        applyLocale(event.payload.language);
-      });
-      await listen("shortcut-capture-cancel", () => {
-        capturing.value = null;
-      });
+      try {
+        await Promise.all([
+          listen<Settings>("settings-changed", (event) => {
+            settings.value = event.payload;
+            applyTheme(event.payload.theme);
+            applyLocale(event.payload.language);
+          }),
+          listen("shortcut-capture-cancel", () => {
+            capturing.value = null;
+          }),
+        ]);
+      } catch (err) {
+        listening = false;
+        error.value = message(err);
+      }
     }
   }
 

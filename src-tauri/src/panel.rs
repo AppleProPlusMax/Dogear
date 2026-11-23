@@ -11,7 +11,9 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::Graphics::Gdi::SetWindowRgn;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
-use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetForegroundWindow, GetWindowRect};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId,
+};
 
 use crate::paste;
 use crate::state::{self, AppState};
@@ -83,6 +85,16 @@ pub fn hold_escape(app: &AppHandle) {
 
 pub fn capture_foreground(state: &Mutex<AppState>) {
     let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() {
+        return;
+    }
+    let mut pid = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    }
+    if pid == 0 || pid == std::process::id() {
+        return;
+    }
     if let Ok(mut guard) = state.lock() {
         guard.previous_hwnd = hwnd.0 as isize;
     }
@@ -141,7 +153,7 @@ pub fn hide(app: &AppHandle) {
     set_search_nonempty(false);
     set_escape(app, false);
     if let Some(window) = app.get_webview_window("main") {
-        if window.is_visible().unwrap_or(false) {
+        if window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(false) {
             if let Ok(pos) = window.outer_position() {
                 crate::settings::save_window_position(app, pos.x, pos.y);
             }
@@ -385,67 +397,94 @@ pub async fn list_clips(state: State<'_, Mutex<AppState>>) -> Result<Vec<crate::
 
 /// 图片原图的 data URL。路径不交给前端，避免 webview 直接访问文件系统。
 #[tauri::command]
-pub fn clip_image(state: State<'_, Mutex<AppState>>, id: i64) -> Result<String, String> {
+pub async fn clip_image(state: State<'_, Mutex<AppState>>, id: i64) -> Result<String, String> {
     let path = clip_file(&state, id, false)?;
-    crate::images::read_as_data_url(&path)
+    tauri::async_runtime::spawn_blocking(move || crate::images::read_as_data_url(&path))
+        .await
+        .map_err(|_| "读取图片被中断".to_string())?
 }
 
 #[tauri::command]
-pub fn clip_thumb(state: State<'_, Mutex<AppState>>, id: i64) -> Result<String, String> {
+pub async fn clip_thumb(state: State<'_, Mutex<AppState>>, id: i64) -> Result<String, String> {
     let path = clip_file(&state, id, true)?;
-    crate::images::read_as_data_url(&path)
+    tauri::async_runtime::spawn_blocking(move || crate::images::read_as_data_url(&path))
+        .await
+        .map_err(|_| "读取缩略图被中断".to_string())?
 }
 
 /// 手动重新识别（Ctrl+O 或预览区按钮）。
 #[tauri::command]
-pub fn retry_ocr(state: State<'_, Mutex<AppState>>, id: i64) -> Result<(), String> {
-    {
-        let mut guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
-        let clip = guard
-            .clips
-            .iter_mut()
-            .find(|clip| clip.id == id)
-            .ok_or("记录不存在")?;
-        if clip.kind != "image" {
-            return Err("只有图片可以识别文字".into());
+pub async fn retry_ocr(app: AppHandle, id: i64) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<Mutex<AppState>>();
+        let _mutation = crate::storage::lock_mutation();
+        {
+            let mut guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+            let clip = guard
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == id)
+                .ok_or("记录不存在")?;
+            if clip.kind != "image" {
+                return Err("只有图片可以识别文字".into());
+            }
+            clip.ocr_status = "pending".into();
+            clip.ocr_text = None;
+            clip.ocr_lang = None;
         }
-        clip.ocr_status = "pending".into();
-        clip.ocr_text = None;
-    }
-    crate::storage::update_ocr(id, "pending", None, None);
-    crate::ocr::enqueue(id);
-    Ok(())
+        crate::storage::update_ocr(id, "pending", None, None);
+        drop(_mutation);
+        crate::ocr::enqueue(id);
+        Ok(())
+    })
+    .await
+    .map_err(|_| "重试识别被中断".to_string())?
 }
 
 #[tauri::command]
-pub fn toggle_clip_pin(state: State<'_, Mutex<AppState>>, id: i64) -> Result<bool, String> {
-    let mut guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
-    let clip = guard
-        .clips
-        .iter_mut()
-        .find(|clip| clip.id == id)
-        .ok_or("记录不存在")?;
-    clip.pinned = !clip.pinned;
-    let pinned = clip.pinned;
-    drop(guard);
-    crate::storage::set_pinned(id, pinned);
-    Ok(pinned)
+pub async fn toggle_clip_pin(app: AppHandle, id: i64) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<Mutex<AppState>>();
+        let _mutation = crate::storage::lock_mutation();
+        let pinned = {
+            let mut guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+            let clip = guard
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == id)
+                .ok_or("记录不存在")?;
+            clip.pinned = !clip.pinned;
+            clip.pinned
+        };
+        crate::storage::set_pinned(id, pinned);
+        Ok(pinned)
+    })
+    .await
+    .map_err(|_| "收藏操作被中断".to_string())?
 }
 
 #[tauri::command]
-pub fn delete_clip(app: AppHandle, state: State<'_, Mutex<AppState>>, id: i64) -> Result<(), String> {
-    let mut guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
-    let index = guard
-        .clips
-        .iter()
-        .position(|clip| clip.id == id)
-        .ok_or("记录不存在")?;
-    let removed = guard.clips.remove(index);
-    let hashes = unused_image_hashes(&guard.clips, std::slice::from_ref(&removed));
-    drop(guard);
-    crate::storage::delete_saved(&[id]);
-    crate::images::remove_hashes(&app, &hashes);
-    Ok(())
+pub async fn delete_clip(app: AppHandle, id: i64) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<Mutex<AppState>>();
+        let _mutation = crate::storage::lock_mutation();
+        let hashes = {
+            let mut guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+            let index = guard
+                .clips
+                .iter()
+                .position(|clip| clip.id == id)
+                .ok_or("记录不存在")?;
+            let removed = guard.clips.remove(index);
+            unused_image_hashes(&guard.clips, std::slice::from_ref(&removed))
+        };
+        crate::storage::delete_saved(&[id]);
+        drop(_mutation);
+        crate::images::remove_hashes(&app, &hashes);
+        Ok(())
+    })
+    .await
+    .map_err(|_| "删除记录被中断".to_string())?
 }
 
 #[derive(serde::Serialize)]
@@ -480,34 +519,37 @@ pub async fn storage_usage(app: AppHandle, state: State<'_, Mutex<AppState>>) ->
 }
 
 #[tauri::command]
-pub async fn clear_clips(app: AppHandle, state: State<'_, Mutex<AppState>>) -> Result<(), String> {
-    let (removed_ids, hashes) = {
-        let mut guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
-        let mut removed_ids = Vec::new();
-        let mut removed_hashes = Vec::new();
-        guard.clips.retain(|clip| {
-            if clip.pinned {
-                return true;
-            }
-            removed_ids.push(clip.id);
-            if clip.kind == "image" {
-                if let Some(hash) = clip.hash.clone() {
-                    removed_hashes.push(hash);
+pub async fn clear_clips(app: AppHandle) -> Result<(), String> {
+    let app_for_task = app.clone();
+    let removed_ids = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<i64>, String> {
+        let state = app_for_task.state::<Mutex<AppState>>();
+        let _mutation = crate::storage::lock_mutation();
+        let (removed_ids, hashes) = {
+            let mut guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+            let mut removed_ids = Vec::new();
+            let mut removed_hashes = Vec::new();
+            guard.clips.retain(|clip| {
+                if clip.pinned {
+                    return true;
                 }
-            }
-            false
-        });
-        let hashes = unused_hash_list(&guard.clips, &removed_hashes);
-        (removed_ids, hashes)
-    };
-    let app_for_files = app.clone();
-    let ids_for_db = removed_ids.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::storage::delete_saved(&ids_for_db);
-        crate::images::remove_hashes(&app_for_files, &hashes);
+                removed_ids.push(clip.id);
+                if clip.kind == "image" {
+                    if let Some(hash) = clip.hash.clone() {
+                        removed_hashes.push(hash);
+                    }
+                }
+                false
+            });
+            let hashes = unused_hash_list(&guard.clips, &removed_hashes);
+            (removed_ids, hashes)
+        };
+        crate::storage::delete_saved(&removed_ids);
+        drop(_mutation);
+        crate::images::remove_hashes(&app_for_task, &hashes);
+        Ok(removed_ids)
     })
     .await
-    .map_err(|_| "清空历史被中断".to_string())?;
+    .map_err(|_| "清空历史被中断".to_string())??;
     notify_pruned(&app, removed_ids);
     Ok(())
 }

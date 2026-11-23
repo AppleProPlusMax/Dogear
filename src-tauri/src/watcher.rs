@@ -119,10 +119,11 @@ unsafe fn listen_loop() -> Result<(), String> {
         None,
     )
     .map_err(|err| err.to_string())?;
+    clipboard::set_owner_hwnd(hwnd.0 as isize);
     AddClipboardFormatListener(hwnd).map_err(|err| err.to_string())?;
 
     let mut message = MSG::default();
-    while GetMessageW(&mut message, None, 0, 0).0 != 0 {
+    while GetMessageW(&mut message, None, 0, 0).0 > 0 {
         let _ = TranslateMessage(&message);
         DispatchMessageW(&message);
     }
@@ -140,7 +141,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
 }
 
 fn on_clipboard(app: &AppHandle) {
-    if clipboard::consume_skipped_listener() || recording_paused(app) {
+    if clipboard::is_own_clipboard_sequence() || recording_paused(app) {
         return;
     }
     match clipboard::read() {
@@ -169,22 +170,16 @@ pub(crate) fn record_image(app: &AppHandle, png: &[u8], hash: &str, source: Opti
 
     // 同一张图再复制一次：挪到最前，识别结果直接复用。
     {
-        let Ok(mut guard) = state.lock() else {
-            return;
+        let _mutation = crate::storage::lock_mutation();
+        let touched = {
+            let Ok(mut guard) = state.lock() else {
+                return;
+            };
+            touch_existing_image(&mut guard, hash, now, source.as_deref())
         };
-        if let Some(existing) = guard.clips.iter_mut().find(|clip| {
-            clip.kind == "image" && clip.hash.as_deref() == Some(hash)
-        }) {
-            existing.created_at = now;
-            if source.is_some() {
-                existing.source_app = source.clone();
-            }
-            let updated = existing.clone();
-            let id = updated.id;
-            guard.clips.retain(|clip| clip.id != id);
-            guard.clips.insert(0, updated.clone());
-            drop(guard);
-            crate::storage::touch_clip(id, now, updated.source_app.as_deref());
+        if let Some(updated) = touched {
+            crate::storage::touch_clip(updated.id, now, updated.source_app.as_deref());
+            drop(_mutation);
             eprintln!("剪切板图片已存在，挪到最前");
             notify(ClipStep {
                 clip: updated,
@@ -202,9 +197,22 @@ pub(crate) fn record_image(app: &AppHandle, png: &[u8], hash: &str, source: Opti
         }
     };
 
+    let _mutation = crate::storage::lock_mutation();
     let Ok(mut guard) = state.lock() else {
         return;
     };
+    // 落盘期间另一条线程（如截图与监听并发）可能已写入同 hash，再查一次避免重复插入。
+    if let Some(updated) = touch_existing_image(&mut guard, hash, now, source.as_deref()) {
+        drop(guard);
+        crate::storage::touch_clip(updated.id, now, updated.source_app.as_deref());
+        drop(_mutation);
+        eprintln!("剪切板图片已存在，挪到最前");
+        notify(ClipStep {
+            clip: updated,
+            removed_ids: Vec::new(),
+        });
+        return;
+    }
     let id = guard.next_id;
     let ocr_auto = guard.settings.ocr_auto;
     guard.next_id += 1;
@@ -235,12 +243,34 @@ pub(crate) fn record_image(app: &AppHandle, png: &[u8], hash: &str, source: Opti
     eprintln!("已记录剪切板图片，{}×{}", saved.width, saved.height);
     if let Some(clip) = clip {
         crate::storage::save_step(&clip, &removed_ids);
+        drop(_mutation);
         crate::images::remove_hashes(app, &evicted_hashes);
         notify(ClipStep { clip, removed_ids });
     }
     if ocr_auto {
         crate::ocr::enqueue(id);
     }
+}
+
+fn touch_existing_image(
+    guard: &mut AppState,
+    hash: &str,
+    now: i64,
+    source: Option<&str>,
+) -> Option<Clip> {
+    let existing = guard
+        .clips
+        .iter_mut()
+        .find(|clip| clip.kind == "image" && clip.hash.as_deref() == Some(hash))?;
+    existing.created_at = now;
+    if let Some(name) = source {
+        existing.source_app = Some(name.to_string());
+    }
+    let updated = existing.clone();
+    let id = updated.id;
+    guard.clips.retain(|clip| clip.id != id);
+    guard.clips.insert(0, updated.clone());
+    Some(updated)
 }
 
 fn record_text(app: &AppHandle, text: String, source: Option<String>) {
@@ -257,6 +287,7 @@ fn record_text(app: &AppHandle, text: String, source: Option<String>) {
     let digest = crate::images::hash(text.as_bytes());
     let detected = crate::detect::classify(&text);
     let now = state::now_ms();
+    let _mutation = crate::storage::lock_mutation();
     let Ok(mut guard) = state.lock() else {
         return;
     };
@@ -265,6 +296,7 @@ fn record_text(app: &AppHandle, text: String, source: Option<String>) {
     let kind = step.clip.kind.clone();
     drop(guard);
     crate::storage::save_step(&step.clip, &step.removed_ids);
+    drop(_mutation);
     crate::images::remove_hashes(app, &evicted_hashes);
     eprintln!("已记录剪切板文本，长度 {chars} 字，类型 {kind}");
     notify(step);
@@ -335,13 +367,14 @@ fn recording_paused(app: &AppHandle) -> bool {
 
 fn trim_history(guard: &mut AppState) -> (Vec<i64>, Vec<String>) {
     let limit = guard.settings.history_limit as usize;
-    let mut need = guard.clips.len().saturating_sub(limit);
+    let unpinned_count = guard.clips.iter().filter(|clip| !clip.pinned).count();
+    let mut need = unpinned_count.saturating_sub(limit);
     if need == 0 {
         return (Vec::new(), Vec::new());
     }
     let mut removed = Vec::new();
     let mut index = guard.clips.len();
-    while index > 1 && need > 0 {
+    while index > 0 && need > 0 {
         index -= 1;
         if guard.clips[index].pinned {
             continue;
@@ -373,6 +406,7 @@ pub(crate) fn apply_history_limit(app: &AppHandle) {
     let Some(state) = app.try_state::<Mutex<AppState>>() else {
         return;
     };
+    let _mutation = crate::storage::lock_mutation();
     let Ok(mut guard) = state.lock() else {
         return;
     };
@@ -382,6 +416,7 @@ pub(crate) fn apply_history_limit(app: &AppHandle) {
         return;
     }
     crate::storage::delete_saved(&removed_ids);
+    drop(_mutation);
     crate::images::remove_hashes(app, &hashes);
     crate::panel::notify_pruned(app, removed_ids);
 }
@@ -483,17 +518,20 @@ mod tests {
             .find(|clip| clip.id == kept)
             .unwrap()
             .pinned = true;
+        // 收藏不占未收藏上限：此时未收藏为 oldest、newest（共 2 条），均保留。
         let newest = store(&mut guard, "newest", 3);
+        let ids: Vec<i64> = guard.clips.iter().map(|clip| clip.id).collect();
+        assert!(ids.contains(&oldest));
+        assert!(ids.contains(&kept));
+        assert!(ids.contains(&newest));
+
+        // 再新增第 3 条未收藏记录，应仅淘汰最早的未收藏 oldest，收藏 kept 保持不变。
+        let third = store(&mut guard, "third", 4);
         let ids: Vec<i64> = guard.clips.iter().map(|clip| clip.id).collect();
         assert!(!ids.contains(&oldest));
         assert!(ids.contains(&kept));
         assert!(ids.contains(&newest));
+        assert!(ids.contains(&third));
         assert!(guard.clips.iter().any(|clip| clip.id == kept && clip.pinned));
-
-        guard.clips.iter_mut().find(|clip| clip.id == newest).unwrap().pinned = true;
-        let fresh = store(&mut guard, "fresh", 4);
-        assert_eq!(guard.clips[0].id, fresh);
-        assert!(guard.clips.iter().any(|clip| clip.id == kept));
-        assert!(guard.clips.iter().any(|clip| clip.id == newest));
     }
 }

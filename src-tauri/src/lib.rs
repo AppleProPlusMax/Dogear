@@ -33,8 +33,10 @@ fn get_settings(state: tauri::State<'_, Mutex<AppState>>) -> Result<Settings, St
 }
 
 #[tauri::command]
-fn update_settings(app: tauri::AppHandle, patch: settings::SettingsPatch) -> Result<Settings, String> {
-    settings::update(&app, patch)
+async fn update_settings(app: tauri::AppHandle, patch: settings::SettingsPatch) -> Result<Settings, String> {
+    tauri::async_runtime::spawn_blocking(move || settings::update(&app, patch))
+        .await
+        .map_err(|_| "保存设置被中断".to_string())?
 }
 
 #[tauri::command]
@@ -151,6 +153,8 @@ pub fn run() {
                         panel::release_escape(&blur_handle);
                         return;
                     }
+                    // 失焦后记录新的外部前台窗口，保证常驻模式切回来时仍能自动粘贴到目标应用。
+                    panel::capture_foreground(&state);
                     if !auto_hide {
                         panel::release_escape(&blur_handle);
                         return;

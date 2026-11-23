@@ -70,6 +70,7 @@ fn recognize_clip(app: &AppHandle, id: i64) {
         recognize_png(&path)
     };
 
+    let _mutation = crate::storage::lock_mutation();
     let status = {
         let Ok(mut guard) = state.lock() else {
             return;
@@ -114,6 +115,7 @@ fn recognize_clip(app: &AppHandle, id: i64) {
         status.ocr_text.as_deref(),
         status.ocr_lang.as_deref(),
     );
+    drop(_mutation);
     let _ = app.emit("ocr-updated", status);
 }
 

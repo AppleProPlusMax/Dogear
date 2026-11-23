@@ -114,8 +114,11 @@ let previewToken = 0;
 let colorToken = 0;
 const searchEl = ref<HTMLInputElement | null>(null);
 const panelEl = ref<HTMLElement | null>(null);
-/// 图片以 data URL 取回，按条目缓存，避免每次切换选中都重新读盘。
+/// 图片以 data URL 取回，按条目做有界 LRU 缓存，避免持续浏览大图时内存无限增长。
+const THUMB_CACHE_LIMIT = 150;
+const FULL_IMAGE_CACHE_LIMIT = 12;
 const thumbs = ref<Record<number, string>>({});
+const thumbOrder: number[] = [];
 const thumbMiss = new Set<number>();
 const thumbPending = new Map<number, number>();
 let thumbTicket = 0;
@@ -125,7 +128,10 @@ const pendingChanges: ClipsChanged[] = [];
 const pendingOcr = new Map<number, OcrUpdate>();
 let historyReady = false;
 const fullImages = ref<Record<number, string>>({});
+const fullImageOrder: number[] = [];
+const fullImagePending = new Set<number>();
 let unlisten: UnlistenFn[] = [];
+let disposed = false;
 
 const languageNames: Record<string, string> = {
   js: "JS",
@@ -223,12 +229,48 @@ function cachedSearchText(clip: Clip) {
   return text;
 }
 
+function touchOrder(order: number[], id: number) {
+  const index = order.indexOf(id);
+  if (index >= 0) order.splice(index, 1);
+  order.push(id);
+}
+
+function removeFromOrder(order: number[], id: number) {
+  const index = order.indexOf(id);
+  if (index >= 0) order.splice(index, 1);
+}
+
+function storeBoundedImage(
+  store: Record<number, string>,
+  order: number[],
+  id: number,
+  url: string,
+  limit: number,
+) {
+  store[id] = url;
+  touchOrder(order, id);
+  while (order.length > limit) {
+    const oldest = order.shift();
+    if (oldest === undefined) break;
+    if (oldest === current.value?.id && order.length > 0) {
+      order.push(oldest);
+      const nextOldest = order.shift();
+      if (nextOldest !== undefined) delete store[nextOldest];
+      continue;
+    }
+    delete store[oldest];
+  }
+}
+
 function dropClipCache(id: number) {
   titleCache.delete(id);
   searchCache.delete(id);
   thumbMiss.delete(id);
   thumbPending.delete(id);
+  fullImagePending.delete(id);
   pendingOcr.delete(id);
+  removeFromOrder(thumbOrder, id);
+  removeFromOrder(fullImageOrder, id);
   delete thumbs.value[id];
   delete fullImages.value[id];
 }
@@ -393,15 +435,46 @@ watch(
   },
 );
 
+function restoreSelection(activeId: number | null) {
+  if (activeId !== null) {
+    const index = filtered.value.findIndex((clip) => clip.id === activeId);
+    if (index >= 0) {
+      selected.value = index;
+      return;
+    }
+  }
+  if (selected.value >= filtered.value.length) {
+    selected.value = Math.max(0, filtered.value.length - 1);
+  }
+}
+
 async function refresh() {
+  const activeId = current.value?.id ?? null;
   searchCache.clear();
-  clips.value = await listClips();
-  if (selected.value >= filtered.value.length) selected.value = 0;
+  const next = await listClips();
+  const validIds = new Set(next.map((clip) => clip.id));
+  for (const key of Object.keys(thumbs.value)) {
+    const id = Number(key);
+    if (!validIds.has(id)) dropClipCache(id);
+  }
+  for (const key of Object.keys(fullImages.value)) {
+    const id = Number(key);
+    if (!validIds.has(id)) dropClipCache(id);
+  }
+  for (const id of [...titleCache.keys()]) {
+    if (!validIds.has(id)) titleCache.delete(id);
+  }
+  for (const id of [...thumbMiss]) {
+    if (!validIds.has(id)) thumbMiss.delete(id);
+  }
+  clips.value = next;
+  restoreSelection(activeId);
   void loadFullImage();
 }
 
 function applySteps(steps: ClipsChanged["steps"]) {
   if (steps.length === 0) return;
+  const activeId = current.value?.id ?? null;
   const next = clips.value.slice();
   for (const step of steps) {
     for (const id of step.removedIds) {
@@ -423,7 +496,7 @@ function applySteps(steps: ClipsChanged["steps"]) {
     if (step.clip.kind !== "image") titleCache.set(step.clip.id, firstLine(step.clip.content));
   }
   clips.value = next;
-  if (selected.value >= filtered.value.length) selected.value = 0;
+  restoreSelection(activeId);
   void loadFullImage();
 }
 
@@ -464,7 +537,8 @@ async function loadVisibleThumbs() {
     try {
       const url = await clipThumb(id);
       if (thumbPending.get(id) !== ticket) continue;
-      thumbs.value[id] = url;
+      if (!clips.value.some((item) => item.id === id)) continue;
+      storeBoundedImage(thumbs.value, thumbOrder, id, url, THUMB_CACHE_LIMIT);
     } catch {
       if (thumbPending.get(id) === ticket) thumbMiss.add(id);
     } finally {
@@ -475,11 +549,22 @@ async function loadVisibleThumbs() {
 
 async function loadFullImage() {
   const clip = current.value;
-  if (!clip || clip.kind !== "image" || fullImages.value[clip.id]) return;
+  if (!clip || clip.kind !== "image") return;
+  const id = clip.id;
+  if (fullImages.value[id]) {
+    touchOrder(fullImageOrder, id);
+    return;
+  }
+  if (fullImagePending.has(id)) return;
+  fullImagePending.add(id);
   try {
-    fullImages.value[clip.id] = await clipImage(clip.id);
+    const url = await clipImage(id);
+    if (!clips.value.some((item) => item.id === id)) return;
+    storeBoundedImage(fullImages.value, fullImageOrder, id, url, FULL_IMAGE_CACHE_LIMIT);
   } catch (err) {
     showNotice(err instanceof Error ? err.message : String(err));
+  } finally {
+    fullImagePending.delete(id);
   }
 }
 
@@ -738,6 +823,14 @@ function cycleFilter(backward: boolean) {
   selected.value = 0;
 }
 
+function focusedActionButton(event: KeyboardEvent) {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return false;
+  const interactive = target.closest("button, a, select, textarea");
+  if (!interactive) return false;
+  return !interactive.classList.contains("item");
+}
+
 function onKeydown(event: KeyboardEvent) {
   if (event.isComposing || event.keyCode === 229 || settingsStore.guideOpen) return;
   if (imageOpen.value) {
@@ -760,10 +853,10 @@ function onKeydown(event: KeyboardEvent) {
     event.preventDefault();
     if (filtered.value.length === 0) return;
     selected.value = (selected.value - 1 + filtered.value.length) % filtered.value.length;
-  } else if (event.key === "Enter") {
+  } else if (event.key === "Enter" && !focusedActionButton(event)) {
     event.preventDefault();
     void pasteSelected(event.shiftKey);
-  } else if (event.key === "o" && event.ctrlKey) {
+  } else if (event.key.toLowerCase() === "o" && event.ctrlKey && !event.altKey && !event.shiftKey) {
     event.preventDefault();
     void recognizeSelected();
   } else if (event.key.toLowerCase() === "p" && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
@@ -959,77 +1052,122 @@ watch(view, (next) => {
   void setSearchNonempty(next === "history" && query.value.length > 0);
 });
 
+watch(
+  () => current.value?.id ?? null,
+  () => {
+    if (!suppressNoticeClear) clearNotice();
+    void loadFullImage();
+  },
+);
+
 watch(selected, () => {
-  if (!suppressNoticeClear) clearNotice();
-  void loadFullImage();
   nextTick(() => scrollSelectedIntoView());
 });
 
+async function registerListener(promise: Promise<UnlistenFn>) {
+  const stop = await promise;
+  if (disposed) {
+    stop();
+    return;
+  }
+  unlisten.push(stop);
+}
+
 onMounted(async () => {
+  disposed = false;
   window.addEventListener("keydown", onEscape, true);
   window.addEventListener("pointerdown", swallowDismissFollowup, true);
   window.addEventListener("click", swallowDismissFollowup, true);
   if (!("__TAURI_INTERNALS__" in window)) return;
   window.addEventListener("mousedown", onDragPointerDown, true);
-  unlisten = [
-    await listen<{ removedIds: number[] }>("history-pruned", (event) => {
-      const gone = new Set(event.payload.removedIds);
-      if (!gone.size) return;
-      clips.value = clips.value.filter((clip) => !gone.has(clip.id));
-      for (const id of gone) dropClipCache(id);
-      if (selected.value >= filtered.value.length) {
-        selected.value = Math.max(0, filtered.value.length - 1);
-      }
-    }),
-    await listen<ClipsChanged>("clips-changed", (event) => {
-      onClipsChanged(event.payload);
-    }),
-    await listen<OcrUpdate>("ocr-updated", (event) => {
-      onOcrUpdated(event.payload);
-    }),
-    await listen("window-shown", () => {
-      closeImage();
-      view.value = "history";
-      query.value = "";
-      filter.value = "all";
-      selected.value = 0;
-      clearNotice();
-      focusSearch();
-    }),
-    await listen("open-settings", () => {
-      closeImage();
-      view.value = "settings";
-    }),
-    await listen("close-image-viewer", () => {
-      closeImage();
-    }),
-    await listen("clear-search", () => {
-      query.value = "";
-    }),
-    await listen<{ effect: string }>("effect-changed", (event) => {
-      document.documentElement.dataset.effect = event.payload.effect;
-    }),
-  ];
-  await Promise.all([
-    refresh(),
-    getEffectState().then((effect) => {
-      document.documentElement.dataset.effect = effect.effect;
-    }),
-  ]);
-  historyReady = true;
-  const batch = pendingChanges.splice(0);
-  applySteps(batch.flatMap((item) => item.steps));
-  for (const update of [...pendingOcr.values()]) applyOcr(update);
-  focusSearch();
+  try {
+    await Promise.all([
+      registerListener(
+        listen<{ removedIds: number[] }>("history-pruned", (event) => {
+          const gone = new Set(event.payload.removedIds);
+          if (!gone.size) return;
+          const activeId = current.value?.id ?? null;
+          clips.value = clips.value.filter((clip) => !gone.has(clip.id));
+          for (const id of gone) dropClipCache(id);
+          restoreSelection(activeId);
+        }),
+      ),
+      registerListener(
+        listen<ClipsChanged>("clips-changed", (event) => {
+          onClipsChanged(event.payload);
+        }),
+      ),
+      registerListener(
+        listen<OcrUpdate>("ocr-updated", (event) => {
+          onOcrUpdated(event.payload);
+        }),
+      ),
+      registerListener(
+        listen("window-shown", () => {
+          closeImage();
+          view.value = "history";
+          query.value = "";
+          filter.value = "all";
+          selected.value = 0;
+          clearNotice();
+          focusSearch();
+        }),
+      ),
+      registerListener(
+        listen("open-settings", () => {
+          closeImage();
+          view.value = "settings";
+        }),
+      ),
+      registerListener(
+        listen("close-image-viewer", () => {
+          closeImage();
+        }),
+      ),
+      registerListener(
+        listen("clear-search", () => {
+          query.value = "";
+          selected.value = 0;
+        }),
+      ),
+      registerListener(
+        listen<{ effect: string }>("effect-changed", (event) => {
+          document.documentElement.dataset.effect = event.payload.effect;
+        }),
+      ),
+    ]);
+  } catch (err) {
+    showNotice(err instanceof Error ? err.message : String(err));
+  }
+  try {
+    const [refreshRes] = await Promise.allSettled([
+      refresh(),
+      getEffectState().then((effect) => {
+        document.documentElement.dataset.effect = effect.effect;
+      }),
+    ]);
+    if (refreshRes.status === "rejected") {
+      const err = refreshRes.reason;
+      showNotice(err instanceof Error ? err.message : String(err));
+    }
+  } finally {
+    historyReady = true;
+    const batch = pendingChanges.splice(0);
+    applySteps(batch.flatMap((item) => item.steps));
+    for (const update of [...pendingOcr.values()]) applyOcr(update);
+    focusSearch();
+  }
 });
 
 onUnmounted(() => {
+  disposed = true;
   window.clearTimeout(noticeTimer);
   window.removeEventListener("keydown", onEscape, true);
   window.removeEventListener("pointerdown", swallowDismissFollowup, true);
   window.removeEventListener("click", swallowDismissFollowup, true);
   window.removeEventListener("mousedown", onDragPointerDown, true);
   for (const stop of unlisten) stop();
+  unlisten = [];
 });
 </script>
 

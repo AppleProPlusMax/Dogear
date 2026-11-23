@@ -1,6 +1,7 @@
 //! 剪切板图片的编解码与落盘。原图按内容哈希存成 PNG，另存一张缩略图给列表用。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tauri::{AppHandle, Manager};
 use windows::Graphics::Imaging::{
@@ -11,6 +12,25 @@ use windows::Storage::Streams::{DataReader, InMemoryRandomAccessStream};
 
 /// 列表缩略图的最大边长。按两倍像素密度给 160px 的槽位留余量。
 const THUMB_MAX_EDGE: u32 = 320;
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// 原子写盘：先写同目录临时文件再替换目标，避免并发读到半截文件或断电写坏。
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let suffix = format!(
+        ".{}-{}.tmp",
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(suffix);
+    let tmp_path = PathBuf::from(tmp);
+    std::fs::write(&tmp_path, bytes).map_err(|err| format!("无法写入文件: {err}"))?;
+    if let Err(err) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!("无法保存文件: {err}"));
+    }
+    Ok(())
+}
 
 pub struct Decoded {
     pub width: u32,
@@ -33,13 +53,13 @@ pub fn save(app: &AppHandle, png: &[u8], hash: &str) -> Result<Saved, String> {
 
     let path = dir.join(format!("{hash}.png"));
     if !path.exists() {
-        std::fs::write(&path, png).map_err(|err| format!("无法写入图片: {err}"))?;
+        write_atomic(&path, png).map_err(|err| format!("无法写入图片: {err}"))?;
     }
 
     let thumb_path = dir.join(format!("{hash}-thumb.png"));
     if !thumb_path.exists() {
         let thumb = thumbnail(png, THUMB_MAX_EDGE)?;
-        std::fs::write(&thumb_path, &thumb).map_err(|err| format!("无法写入缩略图: {err}"))?;
+        write_atomic(&thumb_path, &thumb).map_err(|err| format!("无法写入缩略图: {err}"))?;
     }
 
     Ok(Saved {

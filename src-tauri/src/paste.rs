@@ -34,31 +34,38 @@ enum Payload {
 }
 
 fn payload(state: &State<'_, Mutex<AppState>>, id: i64, as_text: bool, view: &str) -> Result<Payload, String> {
-    let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
-    let clip = guard
-        .clips
-        .iter()
-        .find(|clip| clip.id == id)
-        .ok_or("记录不存在")?;
-    if clip.kind != "image" {
-        let text = if clip.kind == "code" {
-            crate::detect::present_code(&clip.content, clip.language.as_deref(), view)
+    let (kind, content, language, ocr_text, file_path, hash) = {
+        let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+        let clip = guard
+            .clips
+            .iter()
+            .find(|clip| clip.id == id)
+            .ok_or("记录不存在")?;
+        (
+            clip.kind.clone(),
+            clip.content.clone(),
+            clip.language.clone(),
+            clip.ocr_text.clone(),
+            clip.file_path.clone(),
+            clip.hash.clone(),
+        )
+    };
+    if kind != "image" {
+        let text = if kind == "code" {
+            crate::detect::present_code(&content, language.as_deref(), view)
         } else {
-            clip.content.clone()
+            content
         };
         return Ok(Payload::Text(text));
     }
     if as_text {
-        let text = clip
-            .ocr_text
-            .clone()
+        let text = ocr_text
             .filter(|text| !text.trim().is_empty())
             .ok_or("这张图还没有识别出文字")?;
         return Ok(Payload::Text(text));
     }
-    let path = clip.file_path.clone().ok_or("这条记录没有图片")?;
-    let hash = clip.hash.clone().ok_or("这条记录没有图片")?;
-    drop(guard);
+    let path = file_path.ok_or("这条记录没有图片")?;
+    let hash = hash.ok_or("这条记录没有图片")?;
     let png = std::fs::read(&path).map_err(|err| format!("无法读取图片: {err}"))?;
     Ok(Payload::Image { png, hash })
 }
@@ -71,7 +78,7 @@ fn write_payload(payload: &Payload) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn open_link(state: State<'_, Mutex<AppState>>, id: i64) -> Result<(), String> {
+pub async fn open_link(state: State<'_, Mutex<AppState>>, id: i64) -> Result<(), String> {
     let content = {
         let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
         let clip = guard
@@ -85,7 +92,9 @@ pub fn open_link(state: State<'_, Mutex<AppState>>, id: i64) -> Result<(), Strin
         clip.content.clone()
     };
     let url = crate::detect::browser_url(&content).ok_or("这条链接打不开")?;
-    open_in_browser(&url)
+    tauri::async_runtime::spawn_blocking(move || open_in_browser(&url))
+        .await
+        .map_err(|_| "打开链接被中断".to_string())?
 }
 
 fn open_in_browser(url: &str) -> Result<(), String> {
@@ -116,40 +125,53 @@ fn wide(text: &str) -> Vec<u16> {
 }
 
 #[tauri::command]
-pub fn clip_colors(state: State<'_, Mutex<AppState>>, id: i64) -> Result<Vec<crate::detect::FoundColor>, String> {
-    let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
-    let clip = guard
-        .clips
-        .iter()
-        .find(|clip| clip.id == id)
-        .ok_or("记录不存在")?;
-    if clip.kind != "text" && clip.kind != "code" {
-        return Ok(Vec::new());
-    }
-    Ok(crate::detect::find_colors(&clip.content))
+pub async fn clip_colors(state: State<'_, Mutex<AppState>>, id: i64) -> Result<Vec<crate::detect::FoundColor>, String> {
+    let content = {
+        let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+        let clip = guard
+            .clips
+            .iter()
+            .find(|clip| clip.id == id)
+            .ok_or("记录不存在")?;
+        if clip.kind != "text" && clip.kind != "code" {
+            return Ok(Vec::new());
+        }
+        clip.content.clone()
+    };
+    tauri::async_runtime::spawn_blocking(move || crate::detect::find_colors(&content))
+        .await
+        .map_err(|_| "颜色识别被中断".to_string())
 }
 
 #[tauri::command]
-pub fn copy_plain(text: String) -> Result<(), String> {
+pub async fn copy_plain(text: String) -> Result<(), String> {
     if text.chars().count() > 80 {
         return Err("只能复制较短的颜色值".into());
     }
-    clipboard::write_text(&text)
+    tauri::async_runtime::spawn_blocking(move || {
+        let _gate = try_clipboard_action()?;
+        clipboard::write_text(&text)
+    })
+    .await
+    .map_err(|_| "复制被中断".to_string())?
 }
 
 #[tauri::command]
-pub fn preview_code(state: State<'_, Mutex<AppState>>, id: i64, view: String) -> Result<String, String> {
-    let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
-    let clip = guard
-        .clips
-        .iter()
-        .find(|clip| clip.id == id)
-        .ok_or("记录不存在")?;
-    Ok(crate::detect::present_code(
-        &clip.content,
-        clip.language.as_deref(),
-        &view,
-    ))
+pub async fn preview_code(state: State<'_, Mutex<AppState>>, id: i64, view: String) -> Result<String, String> {
+    let (content, language) = {
+        let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+        let clip = guard
+            .clips
+            .iter()
+            .find(|clip| clip.id == id)
+            .ok_or("记录不存在")?;
+        (clip.content.clone(), clip.language.clone())
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::detect::present_code(&content, language.as_deref(), &view)
+    })
+    .await
+    .map_err(|_| "代码格式化被中断".to_string())
 }
 
 #[tauri::command]

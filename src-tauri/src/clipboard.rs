@@ -1,16 +1,17 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use windows::core::w;
-use windows::Win32::Foundation::{CloseHandle, GlobalFree, HANDLE, HGLOBAL};
+use windows::Win32::Foundation::{CloseHandle, GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
     BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HGDIOBJ,
 };
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardOwner, IsClipboardFormatAvailable,
-    OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardOwner,
+    GetClipboardSequenceNumber, IsClipboardFormatAvailable, OpenClipboard,
+    RegisterClipboardFormatW, SetClipboardData,
 };
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
@@ -32,19 +33,42 @@ const MAX_CHARS: usize = 1_000_000;
 /// 超过这个像素数就不收录，避免一张超大图把内存吃满。
 const MAX_PIXELS: i64 = 64_000_000;
 
-/// 自己写入剪切板时跳过紧接着的那一次监听，避免监听线程再把图读回来时卡住。
-static SKIP_LISTENER: AtomicBool = AtomicBool::new(false);
+/// 串行化所有剪切板写入（粘贴、复制、截图回写），避免并发抢占剪切板。
+static CLIPBOARD_WRITE: Mutex<()> = Mutex::new(());
+/// 最近一次由本进程写入剪切板后的系统序号，用于精准跳过自己的 WM_CLIPBOARDUPDATE。
+static LAST_OWN_SEQ: AtomicU32 = AtomicU32::new(0);
+/// 隐藏监听窗口的句柄，供 EmptyClipboard 拥有正确的剪切板 owner。
+static OWNER_HWND: AtomicIsize = AtomicIsize::new(0);
 
-fn skip_listener_once() {
-    SKIP_LISTENER.store(true, Ordering::SeqCst);
+pub fn set_owner_hwnd(hwnd: isize) {
+    OWNER_HWND.store(hwnd, Ordering::SeqCst);
 }
 
-fn clear_skipped_listener() {
-    SKIP_LISTENER.store(false, Ordering::SeqCst);
+fn owner_hwnd() -> Option<HWND> {
+    let raw = OWNER_HWND.load(Ordering::SeqCst);
+    if raw == 0 {
+        None
+    } else {
+        Some(HWND(raw as *mut core::ffi::c_void))
+    }
 }
 
-pub fn consume_skipped_listener() -> bool {
-    SKIP_LISTENER.swap(false, Ordering::SeqCst)
+pub fn is_own_clipboard_sequence() -> bool {
+    let current = unsafe { GetClipboardSequenceNumber() };
+    let own = LAST_OWN_SEQ.load(Ordering::SeqCst);
+    current != 0 && own != 0 && current == own
+}
+
+unsafe fn open_clipboard_retry(owner: Option<HWND>) -> bool {
+    for attempt in 0..8 {
+        if OpenClipboard(owner).is_ok() {
+            return true;
+        }
+        if attempt < 7 {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    false
 }
 
 struct SelfWrite {
@@ -212,14 +236,15 @@ unsafe fn parent_pid(pid: u32) -> Option<u32> {
 
 pub fn read() -> ClipboardRead {
     unsafe {
-        if exclude_format_present() {
+        if !open_clipboard_retry(None) {
+            return ClipboardRead::Empty;
+        }
+        if exclude_format_present_locked() {
+            let _ = CloseClipboard();
             return ClipboardRead::Ignored;
         }
         // 文字优先：带文字的复制更常见，而且图文混合时文字才是用户要的。
         if IsClipboardFormatAvailable(CF_UNICODETEXT).is_ok() {
-            if OpenClipboard(None).is_err() {
-                return ClipboardRead::Empty;
-            }
             let outcome = read_unicode();
             if matches!(outcome, ClipboardRead::Empty) && image_format_present() {
                 let grabbed = grab_image();
@@ -230,9 +255,7 @@ pub fn read() -> ClipboardRead {
             return outcome;
         }
         if !image_format_present() {
-            return ClipboardRead::Empty;
-        }
-        if OpenClipboard(None).is_err() {
+            let _ = CloseClipboard();
             return ClipboardRead::Empty;
         }
         let grabbed = grab_image();
@@ -242,42 +265,39 @@ pub fn read() -> ClipboardRead {
 }
 
 pub fn write_text(text: &str) -> Result<(), String> {
+    let _write_guard = CLIPBOARD_WRITE
+        .lock()
+        .map_err(|_| "剪切板写入锁失败".to_string())?;
     let mut wide: Vec<u16> = text.encode_utf16().collect();
     wide.push(0);
     let bytes = wide.len() * std::mem::size_of::<u16>();
-    skip_listener_once();
     unsafe {
-        let handle = match GlobalAlloc(GMEM_MOVEABLE, bytes) {
-            Ok(handle) => handle,
-            Err(err) => {
-                clear_skipped_listener();
-                return Err(err.to_string());
-            }
-        };
+        let handle = GlobalAlloc(GMEM_MOVEABLE, bytes).map_err(|err| err.to_string())?;
         let locked = GlobalLock(handle);
         if locked.is_null() {
-            clear_skipped_listener();
-            return Err({ let _ = GlobalFree(Some(handle)); "无法锁定剪切板内存".into() });
+            let _ = GlobalFree(Some(handle));
+            return Err("无法锁定剪切板内存".into());
         }
         std::ptr::copy_nonoverlapping(wide.as_ptr(), locked as *mut u16, wide.len());
-        let _ = GlobalUnlock(handle); let pair = (handle, HGLOBAL::default());
-        if OpenClipboard(None).is_err() {
-            clear_skipped_listener();
-            return Err({ let _ = GlobalFree(Some(pair.0)); if !pair.1.is_invalid() { let _ = GlobalFree(Some(pair.1)); } "无法打开剪切板".into() });
+        let _ = GlobalUnlock(handle);
+        if !open_clipboard_retry(owner_hwnd()) {
+            let _ = GlobalFree(Some(handle));
+            return Err("无法打开剪切板".into());
         }
         if EmptyClipboard().is_err() {
             let _ = CloseClipboard();
-            clear_skipped_listener();
-            return Err({ let _ = GlobalFree(Some(pair.0)); if !pair.1.is_invalid() { let _ = GlobalFree(Some(pair.1)); } "无法清空剪切板".into() });
+            let _ = GlobalFree(Some(handle));
+            return Err("无法清空剪切板".into());
         }
         mark_self_write(text);
         let set = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(handle.0)));
         if set.is_err() {
             let _ = GlobalFree(Some(handle));
         }
+        let seq = GetClipboardSequenceNumber();
+        LAST_OWN_SEQ.store(seq, Ordering::SeqCst);
         let _ = CloseClipboard();
         if let Err(err) = set {
-            clear_skipped_listener();
             if let Ok(mut guard) = LAST_WRITE.lock() {
                 *guard = None;
             }
@@ -289,52 +309,57 @@ pub fn write_text(text: &str) -> Result<(), String> {
 
 /// 同时放 PNG 与 CF_DIB：新软件认 PNG（保留透明），老软件认 DIB。
 pub fn write_image(png: &[u8], hash: &str) -> Result<(), String> {
+    let _write_guard = CLIPBOARD_WRITE
+        .lock()
+        .map_err(|_| "剪切板写入锁失败".to_string())?;
     let decoded = crate::images::decode(png)?;
     let dib = build_dib(decoded.width, decoded.height, &decoded.bgra)?;
-    skip_listener_once();
     unsafe {
-        let png_format = RegisterClipboardFormatW(w!("PNG")); let mut pair = (HGLOBAL::default(), HGLOBAL::default());
-        let png_handle = match alloc_global(png, &mut pair.0, None) {
-            Ok(handle) => handle,
-            Err(err) => {
-                clear_skipped_listener();
-                return Err(err);
-            }
-        };
-        let dib_handle = match alloc_global(&dib, &mut pair.1, Some(png_handle)) {
-            Ok(handle) => handle,
-            Err(err) => {
-                clear_skipped_listener();
-                return Err(err);
-            }
-        };
+        let png_format = RegisterClipboardFormatW(w!("PNG"));
+        let mut pair = (HGLOBAL::default(), HGLOBAL::default());
+        let png_handle = alloc_global(png, &mut pair.0, None)?;
+        let dib_handle = alloc_global(&dib, &mut pair.1, Some(png_handle))?;
 
-        if OpenClipboard(None).is_err() {
-            clear_skipped_listener();
-            return Err({ let _ = GlobalFree(Some(pair.0)); if !pair.1.is_invalid() { let _ = GlobalFree(Some(pair.1)); } "无法打开剪切板".into() });
+        if !open_clipboard_retry(owner_hwnd()) {
+            let _ = GlobalFree(Some(pair.0));
+            if !pair.1.is_invalid() {
+                let _ = GlobalFree(Some(pair.1));
+            }
+            return Err("无法打开剪切板".into());
         }
         if EmptyClipboard().is_err() {
             let _ = CloseClipboard();
-            clear_skipped_listener();
-            return Err({ let _ = GlobalFree(Some(pair.0)); if !pair.1.is_invalid() { let _ = GlobalFree(Some(pair.1)); } "无法清空剪切板".into() });
+            let _ = GlobalFree(Some(pair.0));
+            if !pair.1.is_invalid() {
+                let _ = GlobalFree(Some(pair.1));
+            }
+            return Err("无法清空剪切板".into());
         }
         mark_self_image(hash);
+        let mut wrote_any = false;
         if png_format != 0 {
-            if SetClipboardData(png_format, Some(HANDLE(png_handle.0))).is_err() {
+            if SetClipboardData(png_format, Some(HANDLE(png_handle.0))).is_ok() {
+                wrote_any = true;
+            } else {
                 let _ = GlobalFree(Some(png_handle));
             }
         } else {
             let _ = GlobalFree(Some(png_handle));
         }
         let set = SetClipboardData(CF_DIB, Some(HANDLE(dib_handle.0)));
-        if set.is_err() {
+        if set.is_ok() {
+            wrote_any = true;
+        } else {
             let _ = GlobalFree(Some(dib_handle));
         }
+        let seq = GetClipboardSequenceNumber();
+        LAST_OWN_SEQ.store(seq, Ordering::SeqCst);
         let _ = CloseClipboard();
         if let Err(err) = set {
-            clear_skipped_listener();
-            if let Ok(mut guard) = LAST_IMAGE.lock() {
-                *guard = None;
+            if !wrote_any {
+                if let Ok(mut guard) = LAST_IMAGE.lock() {
+                    *guard = None;
+                }
             }
             return Err(err.to_string());
         }
@@ -427,14 +452,29 @@ fn build_dib(width: u32, height: u32, bgra: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn exclude_format_present() -> bool {
-    unsafe {
-        let format = RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing"));
-        if format == 0 {
-            return false;
-        }
-        IsClipboardFormatAvailable(format).is_ok()
+/// 必须在已持有 OpenClipboard 锁时调用，避免检查与读取之间发生 TOCTOU 竞态。
+unsafe fn exclude_format_present_locked() -> bool {
+    let monitor_fmt = RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing"));
+    if monitor_fmt != 0 && IsClipboardFormatAvailable(monitor_fmt).is_ok() {
+        return true;
     }
+    let viewer_ignore = RegisterClipboardFormatW(w!("Clipboard Viewer Ignore"));
+    if viewer_ignore != 0 && IsClipboardFormatAvailable(viewer_ignore).is_ok() {
+        return true;
+    }
+    let history_fmt = RegisterClipboardFormatW(w!("CanIncludeInClipboardHistory"));
+    if history_fmt != 0 && IsClipboardFormatAvailable(history_fmt).is_ok() {
+        if let Some(bytes) = read_global(history_fmt) {
+            if can_include_in_history_flag_is_denied(&bytes) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn can_include_in_history_flag_is_denied(bytes: &[u8]) -> bool {
+    bytes.len() >= 4 && u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) == 0
 }
 
 unsafe fn image_format_present() -> bool {
@@ -723,7 +763,10 @@ unsafe fn read_unicode() -> ClipboardRead {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_dib, decode_dib, decode_unicode_units, pick_source, ClipboardRead, MAX_CHARS};
+    use super::{
+        build_dib, can_include_in_history_flag_is_denied, decode_dib, decode_unicode_units,
+        pick_source, ClipboardRead, MAX_CHARS,
+    };
 
     #[test]
     fn system_broker_is_not_the_copy_source() {
@@ -804,5 +847,12 @@ mod tests {
         let dib = build_dib(1, 1, &[0, 0, 0, 0]).unwrap();
         assert_eq!(dib.len(), 44);
         assert_eq!(&dib[40..44], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn can_include_in_history_dword_zero_is_denied() {
+        assert!(can_include_in_history_flag_is_denied(&0u32.to_le_bytes()));
+        assert!(!can_include_in_history_flag_is_denied(&1u32.to_le_bytes()));
+        assert!(!can_include_in_history_flag_is_denied(&[0, 0]));
     }
 }

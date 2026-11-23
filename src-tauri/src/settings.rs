@@ -15,6 +15,7 @@ use crate::tray;
 
 const SUMMON_DEFAULT: &str = "Alt+V";
 const CAPTURE_DEFAULT: &str = "Alt+C";
+static SETTINGS_UPDATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
@@ -119,36 +120,47 @@ pub fn load() -> Settings {
 }
 
 pub fn update(app: &AppHandle, patch: SettingsPatch) -> Result<Settings, String> {
+    let _guard = SETTINGS_UPDATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let current = current(app)?;
     let next = merge(current.clone(), patch)?;
 
-    if next.summon_shortcut != current.summon_shortcut || next.capture_shortcut != current.capture_shortcut {
-        sync_shortcuts(app, &current, &next).inspect_err(|_| { let _ = register_user_shortcuts(app, &current); })?;
+    let shortcuts_changed = next.summon_shortcut != current.summon_shortcut
+        || next.capture_shortcut != current.capture_shortcut;
+    let launch_changed = next.launch_at_login != current.launch_at_login;
+    let effect_changed = next.reduce_transparency != current.reduce_transparency;
 
-
-
-
-
-
-
+    if shortcuts_changed {
+        sync_shortcuts(app, &current, &next)?;
     }
-    if next.launch_at_login != current.launch_at_login {
+    if launch_changed {
         if let Err(err) = apply_launch(app, next.launch_at_login) {
-            let _ = sync_shortcuts(app, &next, &current);
+            if shortcuts_changed {
+                let _ = sync_shortcuts(app, &next, &current);
+            }
             return Err(err);
         }
     }
-    if next.reduce_transparency != current.reduce_transparency {
+    if effect_changed {
         if let Err(err) = reapply_effect(app, next.reduce_transparency) {
-            let _ = sync_shortcuts(app, &next, &current);
-            let _ = apply_launch(app, current.launch_at_login);
+            if shortcuts_changed {
+                let _ = sync_shortcuts(app, &next, &current);
+            }
+            if launch_changed {
+                let _ = apply_launch(app, current.launch_at_login);
+            }
             return Err(err);
         }
     }
     if let Err(err) = save(&next) {
-        let _ = sync_shortcuts(app, &next, &current);
-        let _ = apply_launch(app, current.launch_at_login);
-        if next.reduce_transparency != current.reduce_transparency {
+        if shortcuts_changed {
+            let _ = sync_shortcuts(app, &next, &current);
+        }
+        if launch_changed {
+            let _ = apply_launch(app, current.launch_at_login);
+        }
+        if effect_changed {
             let _ = reapply_effect(app, current.reduce_transparency);
         }
         return Err(err);
@@ -392,6 +404,9 @@ fn normalize_window_position(position: &str, lang: &str) -> Result<String, Strin
 }
 
 pub fn save_window_position(app: &AppHandle, x: i32, y: i32) {
+    let _lock = SETTINGS_UPDATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(state) = app.try_state::<std::sync::Mutex<AppState>>() else {
         return;
     };
@@ -604,7 +619,17 @@ fn sync_shortcuts(app: &AppHandle, previous: &Settings, next: &Settings) -> Resu
                 .map_err(|err| format!("无法取消 {old}: {err}"))?;
         }
     }
-    register_user_shortcuts(app, next)
+    if let Err(err) = register_user_shortcuts(app, next) {
+        let prev = [&previous.summon_shortcut, &previous.capture_shortcut];
+        for added in [&next.summon_shortcut, &next.capture_shortcut] {
+            if !prev.contains(&added) && shortcuts.is_registered(added.as_str()) {
+                let _ = shortcuts.unregister(added.as_str());
+            }
+        }
+        let _ = register_user_shortcuts(app, previous);
+        return Err(err);
+    }
+    Ok(())
 }
 
 fn unregister_user_shortcuts(app: &AppHandle, settings: &Settings) -> Result<(), String> {
@@ -693,7 +718,7 @@ fn save(settings: &Settings) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|err| format!("无法创建设置目录: {err}"))?;
     }
     let text = serde_json::to_string_pretty(settings).map_err(|err| format!("无法保存设置: {err}"))?;
-    fs::write(&path, text).map_err(|err| format!("无法写入设置: {err}"))
+    crate::images::write_atomic(&path, text.as_bytes()).map_err(|err| format!("无法写入设置: {err}"))
 }
 
 fn settings_path() -> Result<PathBuf, String> {

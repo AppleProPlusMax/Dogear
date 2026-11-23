@@ -164,6 +164,27 @@ fn high_contrast_enabled() -> bool {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     hkcu.open_subkey(r"Control Panel\Accessibility\HighContrast")
         .and_then(|key| key.get_value::<String, _>("Flags"))
-        .map(|flags| flags == "1")
+        .map(|flags| parse_high_contrast_flags(&flags))
         .unwrap_or(false)
+}
+
+fn parse_high_contrast_flags(flags: &str) -> bool {
+    flags
+        .trim()
+        .parse::<u32>()
+        .is_ok_and(|value| (value & 1) != 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_high_contrast_flags;
+
+    #[test]
+    fn high_contrast_checks_bit_zero_of_flags() {
+        assert!(!parse_high_contrast_flags("126"));
+        assert!(parse_high_contrast_flags("127"));
+        assert!(parse_high_contrast_flags("1"));
+        assert!(!parse_high_contrast_flags("0"));
+        assert!(!parse_high_contrast_flags("invalid"));
+    }
 }
