@@ -121,6 +121,10 @@ export function setImageViewer(open: boolean): Promise<void> {
   return invoke("set_image_viewer", { open });
 }
 
+export function setSettingsOpen(open: boolean): Promise<void> {
+  return invoke("set_settings_open", { open });
+}
+
 export function setSearchNonempty(value: boolean): Promise<void> {
   return invoke("set_search_nonempty", { value });
 }

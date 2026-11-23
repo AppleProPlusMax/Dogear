@@ -142,7 +142,8 @@ pub fn recognize_png(path: &Path) -> Result<OcrReport, String> {
     let first = recognize_bitmap(&engine, &bitmap)?;
     let had_spaces = has_cjk_internal_space(&first);
     let mut text = first.clone();
-    if prefers_latin(&first) {
+    let already_latin = language.to_ascii_lowercase().starts_with("en");
+    if !already_latin && prefers_latin(&first) {
         if let Some((english, tag)) = engine_for(&["en-US", "en-GB", "en"]) {
             let second = recognize_bitmap(&english, &bitmap)?;
             if latin_letters(&second) > latin_letters(&first) {

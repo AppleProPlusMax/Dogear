@@ -123,21 +123,26 @@ pub fn update(app: &AppHandle, patch: SettingsPatch) -> Result<Settings, String>
     let _guard = SETTINGS_UPDATE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let current = current(app)?;
+    let (current, was_capturing) = {
+        let state = app.state::<std::sync::Mutex<AppState>>();
+        let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+        (guard.settings.clone(), guard.shortcut_capture)
+    };
     let next = merge(current.clone(), patch)?;
 
     let shortcuts_changed = next.summon_shortcut != current.summon_shortcut
         || next.capture_shortcut != current.capture_shortcut;
     let launch_changed = next.launch_at_login != current.launch_at_login;
     let effect_changed = next.reduce_transparency != current.reduce_transparency;
+    let restore_previous_shortcuts = !was_capturing;
 
     if shortcuts_changed {
-        sync_shortcuts(app, &current, &next)?;
+        sync_shortcuts(app, &current, &next, restore_previous_shortcuts)?;
     }
     if launch_changed {
         if let Err(err) = apply_launch(app, next.launch_at_login) {
             if shortcuts_changed {
-                let _ = sync_shortcuts(app, &next, &current);
+                rollback_shortcuts(app, &current, &next, restore_previous_shortcuts);
             }
             return Err(err);
         }
@@ -145,7 +150,7 @@ pub fn update(app: &AppHandle, patch: SettingsPatch) -> Result<Settings, String>
     if effect_changed {
         if let Err(err) = reapply_effect(app, next.reduce_transparency) {
             if shortcuts_changed {
-                let _ = sync_shortcuts(app, &next, &current);
+                rollback_shortcuts(app, &current, &next, restore_previous_shortcuts);
             }
             if launch_changed {
                 let _ = apply_launch(app, current.launch_at_login);
@@ -155,7 +160,7 @@ pub fn update(app: &AppHandle, patch: SettingsPatch) -> Result<Settings, String>
     }
     if let Err(err) = save(&next) {
         if shortcuts_changed {
-            let _ = sync_shortcuts(app, &next, &current);
+            rollback_shortcuts(app, &current, &next, restore_previous_shortcuts);
         }
         if launch_changed {
             let _ = apply_launch(app, current.launch_at_login);
@@ -172,6 +177,9 @@ pub fn update(app: &AppHandle, patch: SettingsPatch) -> Result<Settings, String>
         guard.settings = next.clone();
         guard.shortcut_capture = false;
     }
+    // 持久化与内存提交完成后即释放 SETTINGS_UPDATE，避免后续跨线程 UI 调用持锁。
+    drop(_guard);
+
     tray::set_paused(next.pause_recording);
     if next.language != current.language {
         tray::apply_language(&next.language);
@@ -262,6 +270,9 @@ pub fn on_global_shortcut(app: &AppHandle, shortcut: &Shortcut) {
         if panel::close_viewer_if_open(app) {
             return;
         }
+        if panel::close_settings_if_open(app) {
+            return;
+        }
         if panel::clear_search_if_nonempty(app) {
             return;
         }
@@ -277,12 +288,6 @@ pub fn on_global_shortcut(app: &AppHandle, shortcut: &Shortcut) {
     } else if binds(shortcut, &capture_shortcut) {
         capture::begin(app);
     }
-}
-
-fn current(app: &AppHandle) -> Result<Settings, String> {
-    let state = app.state::<std::sync::Mutex<AppState>>();
-    let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
-    Ok(guard.settings.clone())
 }
 
 fn configured_shortcuts(app: &AppHandle) -> Option<(String, String)> {
@@ -403,30 +408,48 @@ fn normalize_window_position(position: &str, lang: &str) -> Result<String, Strin
     }
 }
 
+/// 在隐藏窗口时调用（可能在主 UI 线程）。绝不在调用线程等待 SETTINGS_UPDATE，
+/// 而是把落盘交给后台线程串行执行，避免与 settings::update 的跨线程 UI 调用死锁。
 pub fn save_window_position(app: &AppHandle, x: i32, y: i32) {
-    let _lock = SETTINGS_UPDATE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let Some(state) = app.try_state::<std::sync::Mutex<AppState>>() else {
+    let should_save = app
+        .try_state::<std::sync::Mutex<AppState>>()
+        .and_then(|state| {
+            state.lock().ok().map(|guard| {
+                guard.settings.window_position == "remember"
+                    && (guard.settings.last_window_x != Some(x)
+                        || guard.settings.last_window_y != Some(y))
+            })
+        })
+        .unwrap_or(false);
+    if !should_save {
         return;
-    };
-    let updated = {
-        let Ok(mut guard) = state.lock() else {
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _lock = SETTINGS_UPDATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(state) = app.try_state::<std::sync::Mutex<AppState>>() else {
             return;
         };
-        if guard.settings.window_position != "remember" {
-            return;
+        let updated = {
+            let Ok(mut guard) = state.lock() else {
+                return;
+            };
+            if guard.settings.window_position != "remember" {
+                return;
+            }
+            if guard.settings.last_window_x == Some(x) && guard.settings.last_window_y == Some(y) {
+                return;
+            }
+            guard.settings.last_window_x = Some(x);
+            guard.settings.last_window_y = Some(y);
+            guard.settings.clone()
+        };
+        if let Err(err) = save(&updated) {
+            eprintln!("窗口位置保存失败: {err}");
         }
-        if guard.settings.last_window_x == Some(x) && guard.settings.last_window_y == Some(y) {
-            return;
-        }
-        guard.settings.last_window_x = Some(x);
-        guard.settings.last_window_y = Some(y);
-        guard.settings.clone()
-    };
-    if let Err(err) = save(&updated) {
-        eprintln!("窗口位置保存失败: {err}");
-    }
+    });
 }
 
 fn require_history_limit(value: u32, lang: &str) -> Result<u32, String> {
@@ -606,7 +629,12 @@ fn binds(shortcut: &Shortcut, configured: &str) -> bool {
     shortcut.mods == wanted.mods && shortcut.key == wanted.key
 }
 
-fn sync_shortcuts(app: &AppHandle, previous: &Settings, next: &Settings) -> Result<(), String> {
+fn sync_shortcuts(
+    app: &AppHandle,
+    previous: &Settings,
+    next: &Settings,
+    restore_previous: bool,
+) -> Result<(), String> {
     let keep = [&next.summon_shortcut, &next.capture_shortcut];
     let shortcuts = app.global_shortcut();
     for old in [&previous.summon_shortcut, &previous.capture_shortcut] {
@@ -620,16 +648,28 @@ fn sync_shortcuts(app: &AppHandle, previous: &Settings, next: &Settings) -> Resu
         }
     }
     if let Err(err) = register_user_shortcuts(app, next) {
-        let prev = [&previous.summon_shortcut, &previous.capture_shortcut];
-        for added in [&next.summon_shortcut, &next.capture_shortcut] {
-            if !prev.contains(&added) && shortcuts.is_registered(added.as_str()) {
-                let _ = shortcuts.unregister(added.as_str());
-            }
-        }
-        let _ = register_user_shortcuts(app, previous);
+        rollback_shortcuts(app, previous, next, restore_previous);
         return Err(err);
     }
     Ok(())
+}
+
+fn rollback_shortcuts(
+    app: &AppHandle,
+    previous: &Settings,
+    next: &Settings,
+    restore_previous: bool,
+) {
+    let shortcuts = app.global_shortcut();
+    let prev = [&previous.summon_shortcut, &previous.capture_shortcut];
+    for added in [&next.summon_shortcut, &next.capture_shortcut] {
+        if (!restore_previous || !prev.contains(&added)) && shortcuts.is_registered(added.as_str()) {
+            let _ = shortcuts.unregister(added.as_str());
+        }
+    }
+    if restore_previous {
+        let _ = register_user_shortcuts(app, previous);
+    }
 }
 
 fn unregister_user_shortcuts(app: &AppHandle, settings: &Settings) -> Result<(), String> {

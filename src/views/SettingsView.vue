@@ -73,22 +73,43 @@ const windowPositions = computed(() => [
 const summonParts = computed(() => store.settings.summonShortcut.split("+"));
 const captureParts = computed(() => store.settings.captureShortcut.split("+"));
 
-function addIgnore() {
+function normalizeExeKey(name: string) {
+  const trimmed = name.trim().toLowerCase();
+  return trimmed.endsWith(".exe") ? trimmed : `${trimmed}.exe`;
+}
+
+async function addIgnore() {
   const name = ignoreDraft.value.trim();
   if (!name) return;
-  ignoreDraft.value = "";
-  void store.update({ ignoredApps: [...store.settings.ignoredApps, name] });
+  const key = normalizeExeKey(name);
+  if (store.settings.ignoredApps.some((item) => normalizeExeKey(item) === key)) {
+    ignoreDraft.value = "";
+    return;
+  }
+  try {
+    await store.update({ ignoredApps: [...store.settings.ignoredApps, name] });
+    ignoreDraft.value = "";
+  } catch {
+    // 错误已写入 store.error
+  }
 }
 
 function removeIgnore(name: string) {
-  void store.update({
-    ignoredApps: store.settings.ignoredApps.filter((item) => item !== name),
-  });
+  void store
+    .update({
+      ignoredApps: store.settings.ignoredApps.filter((item) => item !== name),
+    })
+    .catch(() => {});
 }
 
-function setHistoryLimit(limit: 200 | 500 | 1000) {
+async function setHistoryLimit(limit: 200 | 500 | 1000) {
   if (store.settings.historyLimit === limit) return;
-  void store.update({ historyLimit: limit });
+  try {
+    await store.update({ historyLimit: limit });
+    await loadStorage();
+  } catch {
+    // 错误已写入 store.error
+  }
 }
 
 async function clearKept() {
@@ -184,20 +205,24 @@ async function onCaptureKey(event: KeyboardEvent) {
 }
 
 function toggle(field: "launchAtLogin" | "pauseRecording" | "reduceTransparency" | "ocrAuto" | "autoHide" | "showSource") {
-  void store.update({ [field]: !store.settings[field] });
+  void store.update({ [field]: !store.settings[field] }).catch(() => {});
 }
 
 onMounted(() => {
+  store.error = "";
   window.addEventListener("keydown", onCaptureKey, true);
   if ("__TAURI_INTERNALS__" in window) {
-    void getVersion().then((value) => {
-      version.value = value;
-    });
+    void getVersion()
+      .then((value) => {
+        version.value = value;
+      })
+      .catch(() => {});
     void loadStorage();
   }
 });
 
 onUnmounted(() => {
+  store.error = "";
   window.removeEventListener("keydown", onCaptureKey, true);
   window.clearTimeout(clearTimer);
   if (store.capturing) void store.cancelCapture();
@@ -218,6 +243,7 @@ onUnmounted(() => {
     </header>
 
     <div class="body">
+      <p v-if="store.error" class="error" role="alert">{{ store.error }}</p>
       <section>
         <h2>{{ t("general") }}</h2>
         <div class="row">
@@ -476,7 +502,6 @@ onUnmounted(() => {
         </div>
       </section>
 
-      <p v-if="store.error" class="error">{{ store.error }}</p>
       <p v-if="version" class="version">{{ t("version", { version }) }}</p>
     </div>
   </main>
@@ -722,8 +747,9 @@ kbd {
   transform: translateX(16px);
 }
 .error {
-  color: var(--text);
-  margin-top: 12px;
+  color: var(--danger);
+  margin: 0 0 12px;
+  font-size: 13px;
 }
 .version {
   flex: none;

@@ -83,10 +83,145 @@ fn pretty_code(content: &str, language: Option<&str>) -> String {
 
 fn compact_code(content: &str, language: Option<&str>) -> String {
     match language {
-        Some("json") => compact_json(content).unwrap_or_else(|| collapse_ws(content)),
+        Some("json") => compact_json(content).unwrap_or_else(|| collapse_ws(content, true)),
         Some("python") | Some("shell") | None => content.to_string(),
-        _ => collapse_ws(content),
+        Some("sql") => {
+            if has_line_comment(content, "--", true, false) {
+                collapse_ws_preserving_lines(content, true, false)
+            } else {
+                collapse_ws(content, false)
+            }
+        }
+        Some("rust") => {
+            if has_line_comment(content, "//", false, true) {
+                collapse_ws_preserving_lines(content, false, true)
+            } else {
+                collapse_ws(content, true)
+            }
+        }
+        Some("js" | "ts" | "c" | "cpp" | "go" | "java") => {
+            if has_line_comment(content, "//", true, true) {
+                collapse_ws_preserving_lines(content, true, true)
+            } else {
+                collapse_ws(content, true)
+            }
+        }
+        _ => collapse_ws(content, true),
     }
+}
+
+fn has_line_comment(
+    text: &str,
+    marker: &str,
+    single_quote_strings: bool,
+    backslash_escape: bool,
+) -> bool {
+    let bytes = text.as_bytes();
+    let m = marker.as_bytes();
+    let mut i = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(mark) = quote {
+            if escaped {
+                escaped = false;
+            } else if backslash_escape && b == b'\\' {
+                escaped = true;
+            } else if b == mark {
+                if !backslash_escape
+                    && mark == b'\''
+                    && i + 1 < bytes.len()
+                    && bytes[i + 1] == b'\''
+                {
+                    i += 1;
+                } else {
+                    quote = None;
+                }
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'"' || b == b'`' || (single_quote_strings && b == b'\'') {
+            quote = Some(b);
+            i += 1;
+            continue;
+        }
+        if bytes[i..].starts_with(m) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// 保留换行的单遍压缩：跨行字符串/模板字面量内部原样保留，行外折叠连续水平空白。
+fn collapse_ws_preserving_lines(
+    text: &str,
+    single_quote_strings: bool,
+    backslash_escape: bool,
+) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut spaced = false;
+    let mut at_line_start = true;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if let Some(mark) = quote {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if backslash_escape && ch == '\\' {
+                escaped = true;
+            } else if ch == mark {
+                if !backslash_escape && mark == '\'' && chars.peek() == Some(&'\'') {
+                    if let Some(next) = chars.next() {
+                        out.push(next);
+                    }
+                } else {
+                    quote = None;
+                }
+            }
+            at_line_start = ch == '\n';
+            continue;
+        }
+        if ch == '\r' {
+            continue;
+        }
+        if ch == '\n' {
+            spaced = false;
+            if !at_line_start {
+                out.push('\n');
+                at_line_start = true;
+            }
+            continue;
+        }
+        if ch == '"' || ch == '`' || (single_quote_strings && ch == '\'') {
+            if spaced && !at_line_start {
+                out.push(' ');
+            }
+            spaced = false;
+            at_line_start = false;
+            quote = Some(ch);
+            out.push(ch);
+            continue;
+        }
+        if ch.is_whitespace() {
+            spaced = !at_line_start;
+            continue;
+        }
+        if spaced && !at_line_start {
+            out.push(' ');
+        }
+        spaced = false;
+        at_line_start = false;
+        out.push(ch);
+    }
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    out
 }
 
 fn pretty_json(text: &str) -> Option<String> {
@@ -112,15 +247,27 @@ fn tidy_lines(text: &str) -> String {
     body
 }
 
-fn collapse_ws(text: &str) -> String {
+fn collapse_ws(text: &str, backslash_escape: bool) -> String {
     let mut out = String::new();
     let mut spaced = false;
     let mut quote: Option<char> = None;
-    for ch in text.chars() {
+    let mut escaped = false;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
         if let Some(mark) = quote {
             out.push(ch);
-            if ch == mark {
-                quote = None;
+            if escaped {
+                escaped = false;
+            } else if backslash_escape && ch == '\\' {
+                escaped = true;
+            } else if ch == mark {
+                if !backslash_escape && mark == '\'' && chars.peek() == Some(&'\'') {
+                    if let Some(next) = chars.next() {
+                        out.push(next);
+                    }
+                } else {
+                    quote = None;
+                }
             }
             continue;
         }
@@ -147,7 +294,7 @@ fn collapse_ws(text: &str) -> String {
 }
 
 fn format_sql(text: &str) -> String {
-    let compact = collapse_ws(text);
+    let compact = collapse_ws(text, false);
     const KEYWORDS: &[&str] = &[
         "LEFT OUTER JOIN",
         "RIGHT OUTER JOIN",
@@ -183,6 +330,11 @@ fn format_sql(text: &str) -> String {
         if let Some(mark) = quote {
             out.push(ch);
             if ch == mark {
+                if mark == '\'' && index + 1 < chars.len() && chars[index + 1] == '\'' {
+                    out.push(chars[index + 1]);
+                    index += 2;
+                    continue;
+                }
                 quote = None;
             }
             index += 1;
@@ -212,8 +364,8 @@ fn format_sql(text: &str) -> String {
 }
 
 fn starts_keyword(chars: &[char], index: usize, keyword: &str) -> bool {
-    let word: Vec<char> = keyword.chars().collect();
-    let end = index + word.len();
+    let bytes = keyword.as_bytes();
+    let end = index + bytes.len();
     if end > chars.len() {
         return false;
     }
@@ -231,8 +383,8 @@ fn starts_keyword(chars: &[char], index: usize, keyword: &str) -> bool {
     }
     chars[index..end]
         .iter()
-        .zip(word.iter())
-        .all(|(got, want)| got.eq_ignore_ascii_case(want))
+        .zip(bytes.iter())
+        .all(|(got, &want)| got.eq_ignore_ascii_case(&(want as char)))
 }
 
 fn is_sql(text: &str) -> bool {
@@ -505,6 +657,9 @@ fn hex_at(bytes: &[u8], index: usize) -> Option<(FoundColor, usize)> {
     let mut end = index + 1;
     while end < bytes.len() && bytes[end].is_ascii_hexdigit() {
         end += 1;
+    }
+    if end < bytes.len() && is_ident_byte(bytes[end]) {
+        return None;
     }
     let len = end - (index + 1);
     if !matches!(len, 3 | 4 | 6 | 8) {
@@ -963,5 +1118,41 @@ mod tests {
     #[test]
     fn prose_with_return_stays_text() {
         assert_eq!(classify("Please return the book tomorrow.").kind, "text");
+    }
+
+    #[test]
+    fn hex_color_ignores_identifiers_like_define() {
+        assert!(find_colors("#define MAX_LEN 64").is_empty());
+        assert!(find_colors("token = #abcdefg").is_empty());
+        assert_eq!(find_colors("color: #def;").len(), 1);
+    }
+
+    #[test]
+    fn compact_code_preserves_lines_when_line_comments_exist() {
+        let js = "// note\nconst x = 1;";
+        let compact_js = present_code(js, Some("js"), "compact");
+        assert!(compact_js.contains('\n'));
+        assert!(compact_js.contains("const x = 1;"));
+
+        let sql = "-- header\nSELECT id FROM users";
+        let compact_sql = present_code(sql, Some("sql"), "compact");
+        assert!(compact_sql.contains('\n'));
+        assert!(compact_sql.contains("SELECT id FROM users"));
+
+        // 含多行模板字面量时不得破坏字符串内部缩进与空格
+        let tpl = "// note\nconst s = `a\n  b   c`;";
+        let compact_tpl = present_code(tpl, Some("js"), "compact");
+        assert!(compact_tpl.contains("`a\n  b   c`"));
+
+        // Rust 生命周期里的单引号不应干扰 // 注释识别
+        let rust = "fn f(s: &'static str) {\n  // note\n  println!(\"{s}\");\n}";
+        let compact_rust = present_code(rust, Some("rust"), "compact");
+        assert!(compact_rust.contains("// note\nprintln!"));
+
+        // 标准 SQL 中以反斜杠结尾的字符串不应把后续 FROM/WHERE 吞进引号
+        let sql_bs = "SELECT 'C:\\' FROM files WHERE id = 1";
+        let pretty_bs = present_code(sql_bs, Some("sql"), "pretty");
+        assert!(pretty_bs.contains("\nFROM"));
+        assert!(pretty_bs.contains("\nWHERE"));
     }
 }

@@ -455,24 +455,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         overlay.dragging.set(false);
         overlay.cursor.set(client_point(lparam));
         let _ = ReleaseCapture();
-        let shot = accepted(overlay.anchor.get(), overlay.cursor.get()).and_then(|(x, y, w, h)| {
-            let x = x.max(0);
-            let y = y.max(0);
-            if x >= overlay.width || y >= overlay.height {
-                return None;
-            }
-            let w = w.min(overlay.width - x);
-            let h = h.min(overlay.height - y);
-            if w < MIN_EDGE || h < MIN_EDGE {
-                return None;
-            }
-            Some(Shot {
+        let shot = accepted(overlay.anchor.get(), overlay.cursor.get())
+            .and_then(|rect| clamp_local_rect(rect, overlay.width, overlay.height))
+            .map(|(x, y, w, h)| Shot {
                 x: overlay.origin_x + x,
                 y: overlay.origin_y + y,
                 width: w,
                 height: h,
-            })
-        });
+            });
         finish(hwnd, overlay, shot);
         return LRESULT(0);
     }
@@ -483,6 +473,24 @@ fn finish(hwnd: HWND, overlay: &Overlay, shot: Option<Shot>) {
     overlay.shot.set(shot);
     unsafe { PostQuitMessage(0) };
     let _ = hwnd;
+}
+
+fn clamp_local_rect(
+    rect: (i32, i32, i32, i32),
+    bounds_w: i32,
+    bounds_h: i32,
+) -> Option<(i32, i32, i32, i32)> {
+    let (x, y, w, h) = rect;
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = (x + w).min(bounds_w);
+    let y1 = (y + h).min(bounds_h);
+    let clamped_w = x1 - x0;
+    let clamped_h = y1 - y0;
+    if clamped_w < MIN_EDGE || clamped_h < MIN_EDGE {
+        return None;
+    }
+    Some((x0, y0, clamped_w, clamped_h))
 }
 
 fn client_point(lparam: LPARAM) -> (i32, i32) {
@@ -584,12 +592,19 @@ unsafe fn copy_screen(shot: &Shot) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{accepted, after_capture, AfterCapture};
+    use super::{accepted, after_capture, clamp_local_rect, AfterCapture};
 
     #[test]
     fn tiny_drag_is_cancelled_and_a_real_drag_keeps_its_box() {
         assert!(accepted((10, 10), (14, 30)).is_none());
         assert_eq!(accepted((40, 20), (10, 50)), Some((10, 20, 30, 30)));
+    }
+
+    #[test]
+    fn negative_drag_edge_clamps_without_shifting_right_edge() {
+        assert_eq!(clamp_local_rect((-10, -5, 40, 30), 100, 100), Some((0, 0, 30, 25)));
+        assert_eq!(clamp_local_rect((-20, 10, 25, 30), 100, 100), None);
+        assert_eq!(clamp_local_rect((80, 90, 40, 40), 100, 100), Some((80, 90, 20, 10)));
     }
 
     #[test]

@@ -63,6 +63,7 @@ pub fn run() {
             panel::list_clips,
             panel::hide_panel,
             panel::set_image_viewer,
+            panel::set_settings_open,
             panel::set_search_nonempty,
             panel::minimize_panel,
             panel::arm_window_drag,
@@ -160,6 +161,7 @@ pub fn run() {
                         return;
                     }
                     if state::now_ms() < until {
+                        panel::release_escape(&blur_handle);
                         return;
                     }
                     let dragging = panel::drag_blur_active(&state)

@@ -85,3 +85,24 @@ test("long json is not colored, short json can still highlight a value", () => {
   assert.equal(colored.find((part) => part.text === '"name"')?.tone, "key");
   assert.equal(colored.find((part) => part.text === "Ada")?.hit, true);
 });
+
+test("search highlights matches spanning syntax token boundaries", () => {
+  const js = 'const name = "Ada";';
+  const parts = paint(js, "js", "const name");
+  assert.equal(parts.map((part) => part.text).join(""), js);
+  const hitText = parts.filter((part) => part.hit).map((part) => part.text).join("");
+  assert.equal(hitText, "const name");
+  assert.equal(parts.find((part) => part.text === "const")?.tone, "kw");
+
+  const json = '{"name": "Ada"}';
+  const jsonParts = paint(json, "json", '"name": "ada"');
+  assert.equal(jsonParts.filter((part) => part.hit).map((part) => part.text).join(""), '"name": "Ada"');
+});
+
+test("python floor division // is not highlighted as a comment", () => {
+  const py = "mid = (lo + hi) // 2  # floor";
+  const parts = paint(py, "python", "");
+  assert.equal(parts.map((part) => part.text).join(""), py);
+  const notes = parts.filter((part) => part.tone === "note").map((part) => part.text);
+  assert.deepEqual(notes, ["# floor"]);
+});

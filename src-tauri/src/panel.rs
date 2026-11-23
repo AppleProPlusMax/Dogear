@@ -20,10 +20,25 @@ use crate::state::{self, AppState};
 
 static ESCAPE_WANTED: AtomicBool = AtomicBool::new(false);
 static VIEWER_OPEN: AtomicBool = AtomicBool::new(false);
+static SETTINGS_OPEN: AtomicBool = AtomicBool::new(false);
 static SEARCH_NONEMPTY: AtomicBool = AtomicBool::new(false);
 
 pub fn set_viewer_open(open: bool) {
     VIEWER_OPEN.store(open, Ordering::SeqCst);
+}
+
+#[tauri::command]
+pub fn set_settings_open(open: bool) {
+    SETTINGS_OPEN.store(open, Ordering::SeqCst);
+}
+
+/// 设置页打开时，Esc 先返回历史页，不直接隐藏整个窗口。
+pub fn close_settings_if_open(app: &AppHandle) -> bool {
+    if !SETTINGS_OPEN.swap(false, Ordering::SeqCst) {
+        return false;
+    }
+    let _ = app.emit("close-settings", ());
+    true
 }
 
 #[tauri::command]
@@ -150,6 +165,7 @@ pub fn apply_auto_hide(app: &AppHandle, auto_hide: bool) {
 
 pub fn hide(app: &AppHandle) {
     let _ = close_viewer_if_open(app);
+    let _ = close_settings_if_open(app);
     set_search_nonempty(false);
     set_escape(app, false);
     if let Some(window) = app.get_webview_window("main") {
@@ -188,7 +204,10 @@ pub fn open_settings(app: &AppHandle) {
         restore_minimized(app, &window);
     } else if !window.is_visible().unwrap_or(false) {
         present(app, &window, false);
+    } else {
+        focus_existing(app, &window);
     }
+    SETTINGS_OPEN.store(true, Ordering::SeqCst);
     let _ = app.emit("open-settings", ());
 }
 
@@ -680,9 +699,10 @@ fn position_near_cursor(window: &tauri::WebviewWindow) {
     let raw_x = point.x;
     let raw_y = point.y + 12;
     let monitor = window
-        .monitor_from_point(raw_x as f64, raw_y as f64)
+        .monitor_from_point(point.x as f64, point.y as f64)
         .ok()
-        .flatten();
+        .flatten()
+        .or_else(|| active_monitor(window));
     let (x, y) = clamp_to_monitor(window, monitor, raw_x, raw_y);
     let _ = window.set_position(PhysicalPosition::new(x, y));
 }

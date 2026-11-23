@@ -33,6 +33,7 @@ import {
   hidePanel,
   setImageViewer,
   setSearchNonempty,
+  setSettingsOpen,
   listClips,
   startCapture,
   pasteClip,
@@ -297,13 +298,23 @@ const filtered = computed(() => {
 
 const current = computed(() => filtered.value[selected.value] ?? null);
 
+const clockNow = ref(Date.now());
+let clockTimer = 0;
+
 const groups = computed(() => {
-  const buckets = new Map<string, { clip: Clip; index: number }[]>();
+  const now = new Date(clockNow.value);
+  const buckets = new Map<string, { label: string; items: { clip: Clip; index: number }[] }>();
   filtered.value.forEach((clip, index) => {
-    const label = dayLabel(clip.createdAt);
-    const items = buckets.get(label) ?? [];
-    items.push({ clip, index });
-    buckets.set(label, items);
+    const key = dayKey(clip.createdAt);
+    const existing = buckets.get(key);
+    if (existing) {
+      existing.items.push({ clip, index });
+    } else {
+      buckets.set(key, {
+        label: dayLabel(clip.createdAt, now),
+        items: [{ clip, index }],
+      });
+    }
   });
   return [...buckets.entries()];
 });
@@ -320,9 +331,9 @@ let anchorDelta = 0;
 
 const flatRows = computed(() => {
   const out: FlatRow[] = [];
-  for (const [label, items] of groups.value) {
-    out.push({ type: "group", key: `g:${label}`, label });
-    for (const item of items) out.push({ type: "item", key: `i:${item.clip.id}`, index: item.index, clip: item.clip });
+  for (const [key, group] of groups.value) {
+    out.push({ type: "group", key: `g:${key}`, label: group.label });
+    for (const item of group.items) out.push({ type: "item", key: `i:${item.clip.id}`, index: item.index, clip: item.clip });
   }
   return out;
 });
@@ -812,6 +823,11 @@ function onViewerPointerUp(event: PointerEvent) {
 }
 
 function focusPanel() { panelEl.value?.focus({ preventScroll: true }); }
+function selectCodeView(mode: CodeView) {
+  codeView.value = mode;
+  focusPanel();
+}
+
 function selectFilter(id: FilterId) { filter.value = id; selected.value = 0; focusPanel(); }
 function selectItem(index: number) { selected.value = index; focusPanel(); }
 function cycleFilter(backward: boolean) {
@@ -909,10 +925,17 @@ function onEscape(event: KeyboardEvent) {
     return;
   }
   if (settingsStore.capturing || settingsStore.guideOpen) return;
+  if (view.value === "settings") {
+    event.preventDefault();
+    event.stopPropagation();
+    showHistory();
+    return;
+  }
   if (view.value === "history" && query.value.length > 0) {
     event.preventDefault();
     event.stopPropagation();
     query.value = "";
+    selected.value = 0;
     return;
   }
   if (!("__TAURI_INTERNALS__" in window)) return;
@@ -962,26 +985,34 @@ function firstLine(content: string) {
   return content.slice(start, end).trim();
 }
 
-function dayLabel(createdAt: number) {
+function dayKey(createdAt: number) {
   const date = new Date(createdAt);
-  const start = (value: Date) => new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
-  const diff = start(new Date()) - start(date);
-  if (diff <= 0) return t("today");
-  if (diff === 86_400_000) return t("yesterday");
+  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
+}
+
+function dayLabel(createdAt: number, now = new Date(clockNow.value)) {
+  const date = new Date(createdAt);
+  const utcDay = (value: Date) => Date.UTC(value.getFullYear(), value.getMonth(), value.getDate());
+  const diffDays = Math.round((utcDay(now) - utcDay(date)) / 86_400_000);
+  if (diffDays <= 0) return t("today");
+  if (diffDays === 1) return t("yesterday");
+  const sameYear = date.getFullYear() === now.getFullYear();
   if (locale.value === "en") {
-    return date.toLocaleDateString("en", { month: "short", day: "numeric" });
+    return date.toLocaleDateString("en", sameYear ? { month: "short", day: "numeric" } : { year: "numeric", month: "short", day: "numeric" });
   }
-  return t("monthDay", { m: date.getMonth() + 1, d: date.getDate() });
+  const md = t("monthDay", { m: date.getMonth() + 1, d: date.getDate() });
+  return sameYear ? md : `${date.getFullYear()}年${md}`;
 }
 
 function relativeTime(createdAt: number) {
-  const delta = Math.max(0, Date.now() - createdAt);
+  const nowMs = clockNow.value;
+  const delta = Math.max(0, nowMs - createdAt);
   const minutes = Math.floor(delta / 60000);
   if (minutes < 1) return t("justNow");
   if (minutes < 60) return t("minutesAgo", { n: minutes });
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return t("hoursAgo", { n: hours });
-  return dayLabel(createdAt);
+  return dayLabel(createdAt, new Date(nowMs));
 }
 
 function lineCount(content: string) {
@@ -1006,6 +1037,7 @@ watch(
       shownCode.value = clip?.kind === "code" ? clip.content : "";
       return;
     }
+    shownCode.value = "";
     try {
       const text = await previewCode(clip.id, codeView.value);
       if (token === previewToken) shownCode.value = text;
@@ -1020,8 +1052,8 @@ watch(
   async () => {
     const clip = current.value;
     const token = ++colorToken;
+    colors.value = [];
     if (!clip || (clip.kind !== "text" && clip.kind !== "code")) {
-      colors.value = [];
       return;
     }
     try {
@@ -1044,12 +1076,14 @@ async function copyColor(rgb: string) {
 }
 
 watch(query, (value) => {
-  if (view.value !== "history") return;
-  void setSearchNonempty(value.length > 0);
+  if (view.value !== "history" || !("__TAURI_INTERNALS__" in window)) return;
+  void setSearchNonempty(value.length > 0).catch(() => {});
 });
 
 watch(view, (next) => {
-  void setSearchNonempty(next === "history" && query.value.length > 0);
+  if (!("__TAURI_INTERNALS__" in window)) return;
+  void setSettingsOpen(next === "settings").catch(() => {});
+  void setSearchNonempty(next === "history" && query.value.length > 0).catch(() => {});
 });
 
 watch(
@@ -1075,6 +1109,10 @@ async function registerListener(promise: Promise<UnlistenFn>) {
 
 onMounted(async () => {
   disposed = false;
+  clockNow.value = Date.now();
+  clockTimer = window.setInterval(() => {
+    clockNow.value = Date.now();
+  }, 60_000);
   window.addEventListener("keydown", onEscape, true);
   window.addEventListener("pointerdown", swallowDismissFollowup, true);
   window.addEventListener("click", swallowDismissFollowup, true);
@@ -1104,6 +1142,7 @@ onMounted(async () => {
       ),
       registerListener(
         listen("window-shown", () => {
+          clockNow.value = Date.now();
           closeImage();
           view.value = "history";
           query.value = "";
@@ -1117,6 +1156,11 @@ onMounted(async () => {
         listen("open-settings", () => {
           closeImage();
           view.value = "settings";
+        }),
+      ),
+      registerListener(
+        listen("close-settings", () => {
+          if (view.value === "settings") showHistory();
         }),
       ),
       registerListener(
@@ -1162,6 +1206,7 @@ onMounted(async () => {
 onUnmounted(() => {
   disposed = true;
   window.clearTimeout(noticeTimer);
+  window.clearInterval(clockTimer);
   window.removeEventListener("keydown", onEscape, true);
   window.removeEventListener("pointerdown", swallowDismissFollowup, true);
   window.removeEventListener("click", swallowDismissFollowup, true);
@@ -1418,7 +1463,7 @@ onUnmounted(() => {
                 :class="{ on: codeView === mode.id }"
                 :aria-selected="codeView === mode.id"
                 :aria-label="mode.label"
-                @click="codeView = mode.id"
+                @click="selectCodeView(mode.id)"
               >
                 {{ mode.label }}
               </button>

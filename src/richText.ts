@@ -47,20 +47,40 @@ export function paint(text: string, mode: PaintMode, queryLower: string): Piece[
   const color = mode !== "plain" && text.length > 0 && text.length <= SEARCH_CHARS;
   const base = color ? colorize(text, mode) : [plain(text)];
   if (!queryLower) return base.filter((part) => part.text);
+  const matches = findMatches(text.slice(0, SEARCH_CHARS), queryLower);
+  if (matches.length === 0) return base.filter((part) => part.text);
   const out: Piece[] = [];
   let seen = 0;
+  let matchIndex = 0;
   for (const part of base) {
-    const start = seen;
-    seen += part.text.length;
-    if (start >= SEARCH_CHARS) {
-      out.push(plain(part.text));
+    const partStart = seen;
+    const partEnd = seen + part.text.length;
+    seen = partEnd;
+    if (partStart >= SEARCH_CHARS || matchIndex >= matches.length) {
+      out.push(part);
       continue;
     }
-    const room = SEARCH_CHARS - start;
-    const head = part.text.slice(0, room);
-    const tail = part.text.slice(room);
-    out.push(...mark(head, queryLower, part.tone));
-    if (tail) out.push(plain(tail));
+    let cursor = partStart;
+    while (matchIndex < matches.length && matches[matchIndex][1] <= partStart) {
+      matchIndex += 1;
+    }
+    while (matchIndex < matches.length && matches[matchIndex][0] < partEnd) {
+      const [mStart, mEnd] = matches[matchIndex];
+      const hitStart = Math.max(cursor, mStart);
+      const hitEnd = Math.min(partEnd, mEnd);
+      if (hitStart > cursor) {
+        out.push({ text: part.text.slice(cursor - partStart, hitStart - partStart), hit: false, tone: part.tone });
+      }
+      if (hitEnd > hitStart) {
+        out.push({ text: part.text.slice(hitStart - partStart, hitEnd - partStart), hit: true, tone: part.tone });
+      }
+      cursor = hitEnd;
+      if (mEnd <= partEnd) matchIndex += 1;
+      else break;
+    }
+    if (cursor < partEnd) {
+      out.push({ text: part.text.slice(cursor - partStart), hit: false, tone: part.tone });
+    }
   }
   return out.filter((part) => part.text);
 }
@@ -69,28 +89,31 @@ function plain(text: string): Piece {
   return { text, hit: false, tone: "" };
 }
 
-function mark(text: string, queryLower: string, tone: Tone): Piece[] {
-  const out: Piece[] = [];
-  let index = 0;
-  while (index < text.length) {
-    const found = findFold(text, queryLower, index);
-    if (found < 0) {
-      out.push({ text: text.slice(index), hit: false, tone });
-      break;
+function findMatches(head: string, queryLower: string): [number, number][] {
+  const ranges: [number, number][] = [];
+  if (!queryLower || queryLower.length > head.length) return ranges;
+  const lowered = head.toLowerCase();
+  if (lowered.length === head.length) {
+    let from = 0;
+    while (from <= lowered.length - queryLower.length) {
+      const at = lowered.indexOf(queryLower, from);
+      if (at < 0) break;
+      ranges.push([at, at + queryLower.length]);
+      from = at + queryLower.length;
     }
-    if (found > index) out.push({ text: text.slice(index, found), hit: false, tone });
-    out.push({ text: text.slice(found, found + queryLower.length), hit: true, tone });
-    index = found + queryLower.length;
+    return ranges;
   }
-  return out;
-}
-
-function findFold(text: string, queryLower: string, from: number): number {
-  const last = text.length - queryLower.length;
-  for (let index = from; index <= last; index += 1) {
-    if (text.slice(index, index + queryLower.length).toLowerCase() === queryLower) return index;
+  let index = 0;
+  const last = head.length - queryLower.length;
+  while (index <= last) {
+    if (head.slice(index, index + queryLower.length).toLowerCase() === queryLower) {
+      ranges.push([index, index + queryLower.length]);
+      index += queryLower.length;
+    } else {
+      index += 1;
+    }
   }
-  return -1;
+  return ranges;
 }
 
 export function colorizeJson(text: string): Piece[] {
@@ -246,17 +269,17 @@ function colorize(text: string, mode: PaintMode): Piece[] {
     case "css":
       return colorizeCss(text);
     case "python":
-      return colorizeFamily(text, PYTHON_WORDS, { hash: "comment", template: false });
+      return colorizeFamily(text, PYTHON_WORDS, { hash: "comment", template: false, slashComments: false });
     case "js":
-      return colorizeFamily(text, JS_WORDS, { hash: "none", template: true });
+      return colorizeFamily(text, JS_WORDS, { hash: "none", template: true, slashComments: true });
     case "ts":
-      return colorizeFamily(text, TS_WORDS, { hash: "none", template: true });
+      return colorizeFamily(text, TS_WORDS, { hash: "none", template: true, slashComments: true });
     case "java":
-      return colorizeFamily(text, JAVA_WORDS, { hash: "none", template: false });
+      return colorizeFamily(text, JAVA_WORDS, { hash: "none", template: false, slashComments: true });
     case "c":
-      return colorizeFamily(text, C_WORDS, { hash: "directive", template: false });
+      return colorizeFamily(text, C_WORDS, { hash: "directive", template: false, slashComments: true });
     case "cpp":
-      return colorizeFamily(text, CPP_WORDS, { hash: "directive", template: false });
+      return colorizeFamily(text, CPP_WORDS, { hash: "directive", template: false, slashComments: true });
     default:
       return [plain(text)];
   }
@@ -265,7 +288,7 @@ function colorize(text: string, mode: PaintMode): Piece[] {
 function colorizeFamily(
   text: string,
   keywords: Set<string>,
-  options: { hash: "none" | "comment" | "directive"; template: boolean },
+  options: { hash: "none" | "comment" | "directive"; template: boolean; slashComments: boolean },
 ): Piece[] {
   const out: Piece[] = [];
   let index = 0;
@@ -291,7 +314,7 @@ function colorizeFamily(
       plainAt = index;
       continue;
     }
-    if (ch === "/" && text[index + 1] === "/") {
+    if (options.slashComments && ch === "/" && text[index + 1] === "/") {
       const start = index;
       while (index < text.length && text[index] !== "\n") index += 1;
       flush(start);
@@ -299,7 +322,7 @@ function colorizeFamily(
       plainAt = index;
       continue;
     }
-    if (ch === "/" && text[index + 1] === "*") {
+    if (options.slashComments && ch === "/" && text[index + 1] === "*") {
       const start = index;
       index += 2;
       while (index < text.length && !(text[index] === "*" && text[index + 1] === "/")) index += 1;
