@@ -298,6 +298,19 @@ const filtered = computed(() => {
 
 const current = computed(() => filtered.value[selected.value] ?? null);
 
+const footerCountText = computed(() => {
+  let kept = 0;
+  for (const clip of clips.value) {
+    if (clip.pinned) kept += 1;
+  }
+  const unpinned = clips.value.length - kept;
+  const shortcut = settingsStore.settings.summonShortcut;
+  const limit = settingsStore.settings.historyLimit;
+  return kept > 0
+    ? t("itemCountWithKept", { shortcut, n: unpinned, limit, kept })
+    : t("itemCount", { shortcut, n: unpinned, limit });
+});
+
 const clockNow = ref(Date.now());
 let clockTimer = 0;
 
@@ -1530,7 +1543,7 @@ onUnmounted(() => {
         </span>
         <span><kbd>Esc</kbd> {{ t("close") }}</span>
       </div>
-      <div class="count" :title="t('historyLimit')">{{ t("itemCount", { shortcut: settingsStore.settings.summonShortcut, n: clips.length, limit: settingsStore.settings.historyLimit }) }}</div>
+      <div class="count" :title="t('historyLimit')">{{ footerCountText }}</div>
     </footer>
     <Transition name="viewer">
       <div

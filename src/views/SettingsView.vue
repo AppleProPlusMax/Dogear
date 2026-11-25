@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { getVersion } from "@tauri-apps/api/app";
-import { clearClips, storageUsage } from "../api";
+import { checkUpdate, clearClips, openReleaseUrl, storageUsage, type UpdateInfo } from "../api";
 import { useSettingsStore, type ShortcutField } from "../stores/settings";
 import { useI18n, type AppLocale } from "../i18n";
 import WindowControls from "../components/WindowControls.vue";
@@ -15,6 +15,9 @@ const clearArmed = ref(false);
 const clearNote = ref("");
 const storageTotal = ref<number | null>(null);
 const storageKept = ref<number | null>(null);
+const checkingUpdate = ref(false);
+const updateInfo = ref<UpdateInfo | null>(null);
+const updateError = ref("");
 let clearTimer = 0;
 
 const storageText = computed(() => {
@@ -202,6 +205,28 @@ async function onCaptureKey(event: KeyboardEvent) {
   } catch {
     // 错误已经写在 store.error 上，继续录制。
   }
+}
+
+async function runCheckUpdate() {
+  if (checkingUpdate.value || !("__TAURI_INTERNALS__" in window)) return;
+  checkingUpdate.value = true;
+  updateError.value = "";
+  try {
+    updateInfo.value = await checkUpdate();
+  } catch (err) {
+    updateInfo.value = null;
+    updateError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    checkingUpdate.value = false;
+  }
+}
+
+function openUpdateLink(url: string) {
+  if (!("__TAURI_INTERNALS__" in window)) return;
+  updateError.value = "";
+  void openReleaseUrl(url).catch((err) => {
+    updateError.value = err instanceof Error ? err.message : String(err);
+  });
 }
 
 function toggle(field: "launchAtLogin" | "pauseRecording" | "reduceTransparency" | "ocrAuto" | "autoHide" | "showSource") {
@@ -502,6 +527,50 @@ onUnmounted(() => {
         </div>
       </section>
 
+      <section>
+        <h2>{{ t("about") }}</h2>
+        <div class="row">
+          <div>
+            <div class="label">{{ t("checkUpdate") }}</div>
+            <p v-if="updateError" class="update-error" role="alert">{{ updateError }}</p>
+            <p v-else-if="updateInfo?.hasUpdate" class="update-ready" role="status">
+              {{ t("updateAvailable", { version: updateInfo.latestVersion }) }}
+            </p>
+            <p v-else-if="updateInfo" role="status">
+              {{ t("upToDate", { version: updateInfo.currentVersion }) }}
+            </p>
+            <p v-else>{{ t("checkUpdateHint") }}</p>
+          </div>
+          <div class="control">
+            <button
+              v-if="updateInfo?.hasUpdate && updateInfo.downloadUrl"
+              type="button"
+              class="text accent"
+              @click="openUpdateLink(updateInfo.downloadUrl)"
+            >
+              {{ t("downloadUpdate") }}
+            </button>
+            <button
+              v-if="updateInfo?.hasUpdate"
+              type="button"
+              class="text"
+              @click="openUpdateLink(updateInfo.releaseUrl)"
+            >
+              {{ t("openRelease") }}
+            </button>
+            <button
+              type="button"
+              class="text"
+              :disabled="checkingUpdate"
+              @click="runCheckUpdate()"
+            >
+              {{ checkingUpdate ? t("checkingUpdate") : updateInfo ? t("checkAgain") : t("checkUpdate") }}
+            </button>
+          </div>
+        </div>
+        <pre v-if="updateInfo?.hasUpdate && updateInfo.notes" class="release-notes">{{ updateInfo.notes }}</pre>
+      </section>
+
       <p v-if="version" class="version">{{ t("version", { version }) }}</p>
     </div>
   </main>
@@ -700,6 +769,37 @@ kbd {
 }
 .text.danger {
   color: var(--danger);
+}
+.text.accent {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+.text:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.update-error {
+  color: var(--danger) !important;
+}
+.update-ready {
+  color: var(--accent) !important;
+  font-weight: 500;
+}
+.release-notes {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--sep);
+  background: var(--fill);
+  color: var(--text-2);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 160px;
+  overflow-y: auto;
 }
 .seg {
   display: inline-flex;

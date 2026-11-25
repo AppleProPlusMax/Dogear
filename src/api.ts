@@ -180,3 +180,20 @@ export function beginShortcutCapture(): Promise<void> {
 export function endShortcutCapture(): Promise<void> {
   return invoke("end_shortcut_capture");
 }
+
+export interface UpdateInfo {
+  currentVersion: string;
+  latestVersion: string;
+  hasUpdate: boolean;
+  releaseUrl: string;
+  downloadUrl: string | null;
+  notes: string;
+}
+
+export function checkUpdate(): Promise<UpdateInfo> {
+  return invoke("check_update");
+}
+
+export function openReleaseUrl(url: string): Promise<void> {
+  return invoke("open_release_url", { url });
+}

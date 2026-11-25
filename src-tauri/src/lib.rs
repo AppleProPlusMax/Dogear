@@ -10,6 +10,7 @@ mod settings;
 mod state;
 mod storage;
 mod tray;
+mod update;
 mod watcher;
 
 use std::sync::Mutex;
@@ -85,7 +86,9 @@ pub fn run() {
             get_settings,
             update_settings,
             begin_shortcut_capture,
-            end_shortcut_capture
+            end_shortcut_capture,
+            update::check_update,
+            update::open_release_url
         ])
         .setup(|app| {
             let window = app

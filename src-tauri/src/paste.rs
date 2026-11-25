@@ -97,7 +97,7 @@ pub async fn open_link(state: State<'_, Mutex<AppState>>, id: i64) -> Result<(),
         .map_err(|_| "打开链接被中断".to_string())?
 }
 
-fn open_in_browser(url: &str) -> Result<(), String> {
+pub(crate) fn open_in_browser(url: &str) -> Result<(), String> {
     let operation = wide("open");
     let target = wide(url);
     let code = unsafe {
