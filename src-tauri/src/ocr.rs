@@ -31,6 +31,11 @@ pub struct OcrReport {
 const MIN_EDGE: u32 = 40;
 
 static QUEUE: OnceLock<Sender<i64>> = OnceLock::new();
+static PENDING_IDS: OnceLock<Mutex<std::collections::HashSet<i64>>> = OnceLock::new();
+
+fn pending_set() -> &'static Mutex<std::collections::HashSet<i64>> {
+    PENDING_IDS.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
 
 /// 串行后台队列：图片入库后排进来，识别完通过 `ocr-updated` 通知前端。
 pub fn start_queue(app: AppHandle) {
@@ -41,13 +46,26 @@ pub fn start_queue(app: AppHandle) {
     std::thread::spawn(move || {
         for id in rx {
             recognize_clip(&app, id);
+            if let Ok(mut set) = pending_set().lock() {
+                set.remove(&id);
+            }
         }
     });
 }
 
 pub fn enqueue(id: i64) {
-    if let Some(tx) = QUEUE.get() {
-        let _ = tx.send(id);
+    let Some(tx) = QUEUE.get() else {
+        return;
+    };
+    if let Ok(mut set) = pending_set().lock() {
+        if !set.insert(id) {
+            return;
+        }
+    }
+    if tx.send(id).is_err() {
+        if let Ok(mut set) = pending_set().lock() {
+            set.remove(&id);
+        }
     }
 }
 

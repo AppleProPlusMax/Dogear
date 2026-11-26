@@ -104,13 +104,21 @@ pub fn set_pinned(id: i64, pinned: bool) {
 }
 
 pub fn delete_saved(ids: &[i64]) {
+    if ids.is_empty() {
+        return;
+    }
     let Some(lock) = DB.get() else {
         return;
     };
-    let Ok(conn) = lock.lock() else {
+    let Ok(mut conn) = lock.lock() else {
         return;
     };
-    if let Err(err) = delete_ids(&conn, ids) {
+    let res = (|| -> Result<(), String> {
+        let tx = conn.transaction().map_err(|err| err.to_string())?;
+        delete_ids(&tx, ids)?;
+        tx.commit().map_err(|err| err.to_string())
+    })();
+    if let Err(err) = res {
         eprintln!("删除历史记录失败: {err}");
     }
 }

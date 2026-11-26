@@ -4,7 +4,7 @@
 
 A small, offline clipboard manager for Windows. What you copy stays findable: summon it with a shortcut, type to search, and press Enter to paste.
 
-This is version 0.1.9. History, paste, screenshots, and on-device text recognition are already usable. The stack is Tauri 2, Vue 3, TypeScript, and SQLite. The design notes are in [docs/design.md](docs/design.md). Released under the [Apache-2.0](LICENSE) license.
+This is version 0.1.9. History, paste, screenshots, and on-device text recognition are already usable. The stack is Tauri 2, Vue 3, TypeScript, and SQLite. Released under the [Apache-2.0](LICENSE) license.
 
 ## What it does
 

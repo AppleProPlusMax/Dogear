@@ -7,8 +7,9 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    keybd_event, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-    VIRTUAL_KEY, VK_CONTROL,
+    keybd_event, GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+    KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RMENU, VK_RSHIFT,
+    VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow,
@@ -283,13 +284,36 @@ pub(crate) unsafe fn focus_window(target: HWND) {
     let _ = BringWindowToTop(target);
 }
 
+const PASTE_MODIFIERS_TO_RELEASE: &[u16] = &[
+    VK_LSHIFT.0,
+    VK_RSHIFT.0,
+    VK_SHIFT.0,
+    VK_LMENU.0,
+    VK_RMENU.0,
+    VK_LWIN.0,
+    VK_RWIN.0,
+];
+
+fn build_paste_inputs(held_modifiers: &[u16]) -> Vec<INPUT> {
+    let mut inputs = Vec::with_capacity(held_modifiers.len() + 4);
+    for &vk in held_modifiers {
+        inputs.push(key_input(vk, KEYEVENTF_KEYUP));
+    }
+    inputs.push(key_input(VK_CONTROL.0, Default::default()));
+    inputs.push(key_input(b'V' as u16, Default::default()));
+    inputs.push(key_input(b'V' as u16, KEYEVENTF_KEYUP));
+    inputs.push(key_input(VK_CONTROL.0, KEYEVENTF_KEYUP));
+    inputs
+}
+
 unsafe fn send_ctrl_v() -> Result<(), String> {
-    let inputs = [
-        key_input(VK_CONTROL.0, Default::default()),
-        key_input(b'V' as u16, Default::default()),
-        key_input(b'V' as u16, KEYEVENTF_KEYUP),
-        key_input(VK_CONTROL.0, KEYEVENTF_KEYUP),
-    ];
+    // 例如用户按 Shift+Enter 纯文本粘贴时，手指可能仍按着 Shift；先松开残留修饰键再发 Ctrl+V。
+    let held: Vec<u16> = PASTE_MODIFIERS_TO_RELEASE
+        .iter()
+        .copied()
+        .filter(|&vk| GetAsyncKeyState(vk as i32) < 0)
+        .collect();
+    let inputs = build_paste_inputs(&held);
     let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
     if sent == inputs.len() as u32 {
         Ok(())
@@ -315,7 +339,10 @@ fn key_input(vk: u16, flags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_
 
 #[cfg(test)]
 mod tests {
-    use super::{can_auto_paste, foreground_unlock_taps, show_command};
+    use super::{
+        build_paste_inputs, can_auto_paste, foreground_unlock_taps, show_command, KEYEVENTF_KEYUP,
+        VK_CONTROL, VK_LSHIFT,
+    };
     use super::{SW_RESTORE, SW_SHOW};
 
     #[test]
@@ -333,5 +360,17 @@ mod tests {
         let taps = foreground_unlock_taps();
         assert!(taps.iter().all(|tap| tap.key_up));
         assert!(taps.iter().any(|tap| tap.vk == 0x12));
+    }
+
+    #[test]
+    fn paste_releases_held_shift_before_sending_ctrl_v() {
+        let inputs = build_paste_inputs(&[VK_LSHIFT.0]);
+        assert_eq!(inputs.len(), 5);
+        unsafe {
+            assert_eq!(inputs[0].Anonymous.ki.wVk, VK_LSHIFT);
+            assert_eq!(inputs[0].Anonymous.ki.dwFlags, KEYEVENTF_KEYUP);
+            assert_eq!(inputs[1].Anonymous.ki.wVk, VK_CONTROL);
+            assert_eq!(inputs[2].Anonymous.ki.wVk.0, b'V' as u16);
+        }
     }
 }

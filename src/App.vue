@@ -7,6 +7,7 @@ import { useI18n } from "./i18n";
 import SettingsView from "./views/SettingsView.vue";
 import WindowControls from "./components/WindowControls.vue";
 import FirstRunGuide from "./components/FirstRunGuide.vue";
+import ImageViewerModal from "./components/ImageViewerModal.vue";
 import {
   layoutOffsets,
   revealScroll,
@@ -75,21 +76,13 @@ const query = ref("");
 const filter = ref<FilterId>("all");
 const selected = ref(0);
 const imageOpen = ref(false);
-const viewScale = ref(1);
-const viewX = ref(0);
-const viewY = ref(0);
-const viewerTransform = computed(() => ({
-  transform: `translate(${viewX.value}px, ${viewY.value}px) scale(${viewScale.value})`,
-}));
-const viewScaleMin = 0.25;
-const viewScaleMax = 8;
-let viewDrag: { id: number; x: number; y: number; originX: number; originY: number; moved: boolean } | null = null;
-let ignoreViewerClick = false;
 let dismissGuard: { x: number; y: number; until: number } | null = null;
 const notice = ref("");
 let noticeTimer = 0;
 let suppressNoticeClear = false;
 let pasting = false;
+let deleting = false;
+let togglingPin = false;
 
 function showNotice(message: string) {
   notice.value = message;
@@ -284,11 +277,21 @@ const searched = computed(() => {
   return clips.value.filter((clip) => clipMatches(clip, parsed, cachedSearchText(clip)));
 });
 
-function countOf(id: FilterId) {
-  if (id === "all") return searched.value.length;
-  if (id === "kept") return searched.value.filter((clip) => clip.pinned).length;
-  return searched.value.filter((clip) => clip.kind === id).length;
-}
+const filterCounts = computed<Record<FilterId, number>>(() => {
+  const counts: Record<FilterId, number> = {
+    all: searched.value.length,
+    text: 0,
+    link: 0,
+    image: 0,
+    code: 0,
+    kept: 0,
+  };
+  for (const clip of searched.value) {
+    counts[clip.kind] += 1;
+    if (clip.pinned) counts.kept += 1;
+  }
+  return counts;
+});
 
 const filtered = computed(() => {
   if (filter.value === "all") return searched.value;
@@ -351,14 +354,15 @@ const flatRows = computed(() => {
   return out;
 });
 
-const rowLayout = computed(() => layoutOffsets(flatRows.value.map((row) => row.type)));
+const rowKinds = computed(() => flatRows.value.map((row) => row.type));
+const rowLayout = computed(() => layoutOffsets(rowKinds.value));
 
 const windowed = computed(() => {
   const rows = flatRows.value;
   const layout = rowLayout.value;
   const maxScroll = Math.max(0, layout.total - listHeight.value);
   const top = Math.min(scrollTop.value, maxScroll);
-  const range = visibleRange(layout.offsets, rows.map((row) => row.type), top, listHeight.value);
+  const range = visibleRange(layout.offsets, rowKinds.value, top, listHeight.value);
   return {
     rows: rows.slice(range.start, range.end),
     offset: layout.offsets[range.start] ?? 0,
@@ -374,7 +378,7 @@ function captureAnchor() {
   }
   const layout = rowLayout.value;
   const rows = flatRows.value;
-  const range = visibleRange(layout.offsets, rows.map((row) => row.type), el.scrollTop, el.clientHeight, 0);
+  const range = visibleRange(layout.offsets, rowKinds.value, el.scrollTop, el.clientHeight, 0);
   for (let index = range.start; index < rows.length; index++) {
     const row = rows[index];
     if (row.type !== "item") continue;
@@ -547,28 +551,49 @@ function onOcrUpdated(update: OcrUpdate) {
 }
 
 async function loadVisibleThumbs() {
-  const ids: number[] = [];
+  const queue: number[] = [];
+  const seen = new Set<number>();
   for (const row of windowed.value.rows) {
     if (row.type !== "item" || row.clip.kind !== "image") continue;
-    ids.push(row.clip.id);
+    const id = row.clip.id;
+    if (seen.has(id) || thumbs.value[id] || thumbMiss.has(id) || thumbPending.has(id)) continue;
+    seen.add(id);
+    queue.push(id);
   }
   const selectedClip = current.value;
-  if (selectedClip?.kind === "image") ids.push(selectedClip.id);
-  for (const id of ids) {
-    if (thumbs.value[id] || thumbMiss.has(id) || thumbPending.has(id)) continue;
-    const ticket = ++thumbTicket;
-    thumbPending.set(id, ticket);
-    try {
-      const url = await clipThumb(id);
-      if (thumbPending.get(id) !== ticket) continue;
-      if (!clips.value.some((item) => item.id === id)) continue;
-      storeBoundedImage(thumbs.value, thumbOrder, id, url, THUMB_CACHE_LIMIT);
-    } catch {
-      if (thumbPending.get(id) === ticket) thumbMiss.add(id);
-    } finally {
-      if (thumbPending.get(id) === ticket) thumbPending.delete(id);
-    }
+  if (
+    selectedClip?.kind === "image" &&
+    !seen.has(selectedClip.id) &&
+    !thumbs.value[selectedClip.id] &&
+    !thumbMiss.has(selectedClip.id) &&
+    !thumbPending.has(selectedClip.id)
+  ) {
+    queue.push(selectedClip.id);
   }
+  if (queue.length === 0) return;
+
+  let cursor = 0;
+  const workers = Math.min(4, queue.length);
+  await Promise.all(
+    Array.from({ length: workers }, async () => {
+      while (cursor < queue.length) {
+        const id = queue[cursor++];
+        if (thumbs.value[id] || thumbMiss.has(id) || thumbPending.has(id)) continue;
+        const ticket = ++thumbTicket;
+        thumbPending.set(id, ticket);
+        try {
+          const url = await clipThumb(id);
+          if (thumbPending.get(id) !== ticket) continue;
+          if (!clips.value.some((item) => item.id === id)) continue;
+          storeBoundedImage(thumbs.value, thumbOrder, id, url, THUMB_CACHE_LIMIT);
+        } catch {
+          if (thumbPending.get(id) === ticket) thumbMiss.add(id);
+        } finally {
+          if (thumbPending.get(id) === ticket) thumbPending.delete(id);
+        }
+      }
+    }),
+  );
 }
 
 async function loadFullImage() {
@@ -680,23 +705,25 @@ async function copySelected(asText = false) {
 
 async function toggleFavorite() {
   const clip = current.value;
-  if (!clip) return;
-  const previous = clip.pinned;
-  clip.pinned = !previous;
+  if (!clip || togglingPin) return;
+  togglingPin = true;
   try {
-    clip.pinned = await toggleClipPin(clip.id);
+    const pinned = await toggleClipPin(clip.id);
+    clip.pinned = pinned;
     if (filter.value === "kept" && !clip.pinned && selected.value >= filtered.value.length) {
       selected.value = Math.max(0, filtered.value.length - 1);
     }
   } catch (err) {
-    clip.pinned = previous;
     showNotice(err instanceof Error ? err.message : String(err));
+  } finally {
+    togglingPin = false;
   }
 }
 
 async function deleteSelected() {
   const clip = current.value;
-  if (!clip) return;
+  if (!clip || deleting) return;
+  deleting = true;
   const id = clip.id;
   clearNotice();
   try {
@@ -710,21 +737,26 @@ async function deleteSelected() {
     showNotice(t("removedItem"));
   } catch (err) {
     showNotice(err instanceof Error ? err.message : String(err));
+  } finally {
+    deleting = false;
   }
 }
 
 async function recognizeSelected() {
   const clip = current.value;
-  if (!clip || clip.kind !== "image") return;
+  if (!clip || clip.kind !== "image" || clip.ocrStatus === "pending") return;
   clearNotice();
   try {
     const previousStatus = clip.ocrStatus;
     const previousText = clip.ocrText;
+    const previousLang = clip.ocrLang;
     clip.ocrStatus = "pending";
     clip.ocrText = null;
+    clip.ocrLang = null;
     await retryOcr(clip.id).catch((err) => {
       clip.ocrStatus = previousStatus;
       clip.ocrText = previousText;
+      clip.ocrLang = previousLang;
       throw err;
     });
   } catch (err) {
@@ -732,20 +764,16 @@ async function recognizeSelected() {
   }
 }
 
-function resetViewer() {
-  viewScale.value = 1;
-  viewX.value = 0;
-  viewY.value = 0;
-  viewDrag = null;
-  ignoreViewerClick = false;
+function syncImageViewerFlag(open: boolean) {
+  if (!("__TAURI_INTERNALS__" in window)) return;
+  void setImageViewer(open).catch(() => {});
 }
 
 function openImage() {
   if (settingsStore.guideOpen) return;
   if (current.value?.kind !== "image" || !currentImage.value) return;
-  resetViewer();
   imageOpen.value = true;
-  void setImageViewer(true);
+  syncImageViewerFlag(true);
   void loadFullImage();
 }
 
@@ -755,9 +783,15 @@ function closeImage(event?: Event) {
     dismissGuard = { x: event.clientX, y: event.clientY, until: performance.now() + 500 };
   }
   imageOpen.value = false;
-  resetViewer();
-  void setImageViewer(false);
+  syncImageViewerFlag(false);
 }
+
+watch(
+  () => imageOpen.value && (!current.value || current.value.kind !== "image" || !currentImage.value),
+  (invalid) => {
+    if (invalid) closeImage();
+  },
+);
 
 function swallowDismissFollowup(event: Event) {
   if (!dismissGuard || performance.now() > dismissGuard.until) {
@@ -770,69 +804,6 @@ function swallowDismissFollowup(event: Event) {
   if (dx * dx + dy * dy > 64) return;
   event.preventDefault();
   event.stopPropagation();
-}
-
-function onViewerBackdrop(event: MouseEvent) {
-  if (ignoreViewerClick) {
-    ignoreViewerClick = false;
-    return;
-  }
-  closeImage(event);
-}
-
-function onViewerWheel(event: WheelEvent) {
-  const frame = event.currentTarget;
-  if (!(frame instanceof HTMLElement)) return;
-  const rect = frame.getBoundingClientRect();
-  const ox = event.clientX - (rect.left + rect.width / 2);
-  const oy = event.clientY - (rect.top + rect.height / 2);
-  const prev = viewScale.value;
-  let delta = event.deltaY;
-  if (event.deltaMode === 1) delta *= 16;
-  if (event.deltaMode === 2) delta *= rect.height;
-  const next = Math.min(viewScaleMax, Math.max(viewScaleMin, prev * Math.exp(-delta * 0.0015)));
-  if (next === prev) return;
-  const lx = (ox - viewX.value) / prev;
-  const ly = (oy - viewY.value) / prev;
-  viewScale.value = next;
-  viewX.value = ox - lx * next;
-  viewY.value = oy - ly * next;
-}
-
-function onViewerPointerDown(event: PointerEvent) {
-  if (event.button !== 0) return;
-  const target = event.currentTarget;
-  if (!(target instanceof HTMLElement)) return;
-  target.setPointerCapture(event.pointerId);
-  viewDrag = {
-    id: event.pointerId,
-    x: event.clientX,
-    y: event.clientY,
-    originX: viewX.value,
-    originY: viewY.value,
-    moved: false,
-  };
-  event.preventDefault();
-}
-
-function onViewerPointerMove(event: PointerEvent) {
-  if (!viewDrag || event.pointerId !== viewDrag.id) return;
-  const dx = event.clientX - viewDrag.x;
-  const dy = event.clientY - viewDrag.y;
-  if (dx * dx + dy * dy > 9) viewDrag.moved = true;
-  viewX.value = viewDrag.originX + dx;
-  viewY.value = viewDrag.originY + dy;
-}
-
-function onViewerPointerUp(event: PointerEvent) {
-  if (!viewDrag || event.pointerId !== viewDrag.id) return;
-  const moved = viewDrag.moved;
-  viewDrag = null;
-  if (!moved) return;
-  ignoreViewerClick = true;
-  window.setTimeout(() => {
-    ignoreViewerClick = false;
-  }, 0);
 }
 
 function focusPanel() { panelEl.value?.focus({ preventScroll: true }); }
@@ -1040,6 +1011,8 @@ function lineCount(content: string) {
   }
   return count;
 }
+
+const displayLineCount = computed(() => lineCount(displayContent.value));
 
 watch(
   [() => current.value?.id, () => current.value?.content, codeView],
@@ -1307,7 +1280,7 @@ onUnmounted(() => {
             :aria-selected="filter === item.id"
             @click="selectFilter(item.id)"
           >
-            {{ item.label }} <em>{{ countOf(item.id) }}</em>
+            {{ item.label }} <em>{{ filterCounts[item.id] }}</em>
           </button>
         </div>
       </div>
@@ -1449,6 +1422,7 @@ onUnmounted(() => {
               <button
                 type="button"
                 :class="current.ocrStatus === 'none' ? 'btn pri prompt' : 'link'"
+                :disabled="current.ocrStatus === 'pending'"
                 @click="recognizeSelected"
               >
                 {{ current.ocrStatus === "none" ? t("recognize") : t("recognizeAgain") }}
@@ -1489,7 +1463,7 @@ onUnmounted(() => {
             <span v-for="(part, index) in previewParts" :key="index" :class="partClass(part)">{{ part.text }}</span>
           </div>
           <div class="facts">
-            <span><b>{{ lineCount(displayContent) }}</b> {{ t("lines") }}</span>
+            <span><b>{{ displayLineCount }}</b> {{ t("lines") }}</span>
             <i></i>
             <span><b>{{ displayContent.length }}</b> {{ t("chars") }}</span>
           </div>
@@ -1545,34 +1519,14 @@ onUnmounted(() => {
       </div>
       <div class="count" :title="t('historyLimit')">{{ footerCountText }}</div>
     </footer>
-    <Transition name="viewer">
-      <div
-        v-if="imageOpen && current && currentImage"
-        class="viewer"
-        role="dialog"
-        aria-modal="true"
-        :aria-label="t('viewImage')"
-        @click="onViewerBackdrop"
-        @wheel.prevent="onViewerWheel"
-      >
-        <img
-          :src="currentImage"
-          :alt="imageSize(current)"
-          :style="viewerTransform"
-          draggable="false"
-          @pointerdown="onViewerPointerDown"
-          @pointermove="onViewerPointerMove"
-          @pointerup="onViewerPointerUp"
-          @pointercancel="onViewerPointerUp"
-          @click.stop
-        />
-        <button type="button" class="viewer-x" :aria-label="t('close')" @click.stop="closeImage">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M7 7l10 10M17 7L7 17" />
-          </svg>
-        </button>
-      </div>
-    </Transition>
+    <ImageViewerModal
+      :open="imageOpen && Boolean(current && currentImage)"
+      :src="currentImage"
+      :alt="current ? imageSize(current) : ''"
+      :label="t('viewImage')"
+      :close-label="t('close')"
+      @close="closeImage"
+    />
     <FirstRunGuide v-if="settingsStore.guideOpen" />
   </main>
 </template>
@@ -1790,7 +1744,6 @@ onUnmounted(() => {
   left: 0;
   right: 0;
 }
-.list.empty,
 .list.empty,
 .preview.quiet {
   display: flex;
@@ -2182,67 +2135,6 @@ onUnmounted(() => {
   object-fit: contain;
   border-radius: 6px;
   cursor: zoom-in;
-}
-.viewer {
-  position: absolute;
-  inset: 0;
-  z-index: 3;
-  display: grid;
-  place-items: center;
-  overflow: hidden;
-  padding: 16px;
-  background: var(--scrim);
-  -webkit-app-region: no-drag;
-  app-region: no-drag;
-}
-.viewer img {
-  position: relative;
-  z-index: 0;
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-  transform-origin: center center;
-  cursor: grab;
-  touch-action: none;
-  user-select: none;
-}
-.viewer img:active {
-  cursor: grabbing;
-}
-.viewer-x {
-  position: absolute;
-  right: 16px;
-  bottom: 16px;
-  z-index: 2;
-  width: 32px;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--card-border);
-  border-radius: var(--r-ctl);
-  background: var(--panel-solid);
-  color: var(--text);
-  cursor: pointer;
-}
-.viewer-x:hover {
-  background: var(--fill);
-}
-.viewer-x svg {
-  width: 16px;
-  height: 16px;
-  stroke: currentColor;
-  fill: none;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-}
-.viewer-enter-active,
-.viewer-leave-active {
-  transition: opacity 160ms var(--ease);
-}
-.viewer-enter-from,
-.viewer-leave-to {
-  opacity: 0;
 }
 .shotbox p {
   margin: 0;

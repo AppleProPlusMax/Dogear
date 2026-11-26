@@ -47,7 +47,12 @@ pub struct Saved {
 
 /// 原图与缩略图都写在 `%APPDATA%\com.daihao.dogear\images\` 下，文件名用内容哈希。
 pub fn save(app: &AppHandle, png: &[u8], hash: &str) -> Result<Saved, String> {
-    let decoded = decode(png)?;
+    let decoder = open_decoder(png)?;
+    let width = decoder.PixelWidth().map_err(|err| err.to_string())?;
+    let height = decoder.PixelHeight().map_err(|err| err.to_string())?;
+    if width == 0 || height == 0 {
+        return Err("图片尺寸为 0".into());
+    }
     let dir = image_dir(app)?;
     std::fs::create_dir_all(&dir).map_err(|err| format!("无法创建图片目录: {err}"))?;
 
@@ -58,16 +63,35 @@ pub fn save(app: &AppHandle, png: &[u8], hash: &str) -> Result<Saved, String> {
 
     let thumb_path = dir.join(format!("{hash}-thumb.png"));
     if !thumb_path.exists() {
-        let thumb = thumbnail(png, THUMB_MAX_EDGE)?;
+        let thumb = thumbnail_from_decoder(&decoder, width, height, png, THUMB_MAX_EDGE)?;
         write_atomic(&thumb_path, &thumb).map_err(|err| format!("无法写入缩略图: {err}"))?;
     }
 
     Ok(Saved {
         path,
         thumb_path,
-        width: decoded.width,
-        height: decoded.height,
+        width,
+        height,
     })
+}
+
+/// 若缩略图被外部清理工具删掉，从原图自动重生成一份。
+pub fn ensure_thumbnail(file_path: &Path, thumb_path: &Path) -> Result<(), String> {
+    if thumb_path.is_file() {
+        return Ok(());
+    }
+    let png = std::fs::read(file_path).map_err(|err| format!("无法读取原图: {err}"))?;
+    let decoder = open_decoder(&png)?;
+    let width = decoder.PixelWidth().map_err(|err| err.to_string())?;
+    let height = decoder.PixelHeight().map_err(|err| err.to_string())?;
+    if width == 0 || height == 0 {
+        return Err("图片尺寸为 0".into());
+    }
+    if let Some(parent) = thumb_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| format!("无法创建缩略图目录: {err}"))?;
+    }
+    let thumb = thumbnail_from_decoder(&decoder, width, height, &png, THUMB_MAX_EDGE)?;
+    write_atomic(thumb_path, &thumb).map_err(|err| format!("无法写入缩略图: {err}"))
 }
 
 pub fn read_as_data_url(path: &Path) -> Result<String, String> {
@@ -143,10 +167,13 @@ pub fn decode(png: &[u8]) -> Result<Decoded, String> {
     })
 }
 
-fn thumbnail(png: &[u8], max_edge: u32) -> Result<Vec<u8>, String> {
-    let decoder = open_decoder(png)?;
-    let width = decoder.PixelWidth().map_err(|err| err.to_string())?;
-    let height = decoder.PixelHeight().map_err(|err| err.to_string())?;
+fn thumbnail_from_decoder(
+    decoder: &BitmapDecoder,
+    width: u32,
+    height: u32,
+    png: &[u8],
+    max_edge: u32,
+) -> Result<Vec<u8>, String> {
     if width == 0 || height == 0 {
         return Err("图片尺寸为 0".into());
     }
@@ -517,6 +544,21 @@ mod tests {
         remove_hashes_in(&dir, &["keep1".to_string()]);
         assert!(!dir.join("keep1.png").exists());
         assert!(!dir.join("keep1-thumb.png").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_thumbnail_regenerates_missing_file() {
+        let dir = std::env::temp_dir().join(format!("dogear-thumb-test-{}", crate::state::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bgra = vec![255u8; 4 * 4 * 4];
+        let png = encode(4, 4, &bgra).unwrap();
+        let orig = dir.join("sample.png");
+        let thumb = dir.join("sample-thumb.png");
+        std::fs::write(&orig, &png).unwrap();
+        assert!(!thumb.exists());
+        super::ensure_thumbnail(&orig, &thumb).unwrap();
+        assert!(thumb.is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -4,7 +4,7 @@
 
 轻量、离线的 Windows 剪切板工具。复制过的都找得回：快捷键呼出，输入即搜索，回车即粘贴。
 
-当前版本 0.1.9。历史、粘贴、截图和本机文字识别已经能用。技术栈是 Tauri 2、Vue 3、TypeScript 和 SQLite。设计说明见 [docs/design.md](docs/design.md)。以 [Apache-2.0](LICENSE) 许可发布。
+当前版本 0.1.9。历史、粘贴、截图和本机文字识别已经能用。技术栈是 Tauri 2、Vue 3、TypeScript 和 SQLite。以 [Apache-2.0](LICENSE) 许可发布。
 
 ## 它做什么
 

@@ -425,10 +425,31 @@ pub async fn clip_image(state: State<'_, Mutex<AppState>>, id: i64) -> Result<St
 
 #[tauri::command]
 pub async fn clip_thumb(state: State<'_, Mutex<AppState>>, id: i64) -> Result<String, String> {
-    let path = clip_file(&state, id, true)?;
-    tauri::async_runtime::spawn_blocking(move || crate::images::read_as_data_url(&path))
-        .await
-        .map_err(|_| "读取缩略图被中断".to_string())?
+    let (file_path, thumb_path) = {
+        let guard = state.lock().map_err(|_| "状态锁失败".to_string())?;
+        let clip = guard
+            .clips
+            .iter()
+            .find(|clip| clip.id == id)
+            .ok_or("记录不存在")?;
+        let thumb = clip
+            .thumb_path
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| "这条记录没有图片".to_string())?;
+        let file = clip.file_path.as_ref().map(std::path::PathBuf::from);
+        (file, thumb)
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        if !thumb_path.is_file() {
+            if let Some(file) = file_path.as_deref().filter(|path| path.is_file()) {
+                let _ = crate::images::ensure_thumbnail(file, &thumb_path);
+            }
+        }
+        crate::images::read_as_data_url(&thumb_path)
+    })
+    .await
+    .map_err(|_| "读取缩略图被中断".to_string())?
 }
 
 /// 手动重新识别（Ctrl+O 或预览区按钮）。

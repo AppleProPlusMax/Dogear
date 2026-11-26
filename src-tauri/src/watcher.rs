@@ -178,6 +178,19 @@ pub(crate) fn record_image(app: &AppHandle, png: &[u8], hash: &str, source: Opti
             touch_existing_image(&mut guard, hash, now, source.as_deref())
         };
         if let Some(updated) = touched {
+            let file_ok = updated
+                .file_path
+                .as_deref()
+                .is_some_and(|p| std::path::Path::new(p).is_file());
+            let thumb_ok = updated
+                .thumb_path
+                .as_deref()
+                .is_some_and(|p| std::path::Path::new(p).is_file());
+            if !file_ok || !thumb_ok {
+                if let Err(err) = crate::images::save(app, png, hash) {
+                    eprintln!("补写缺失的剪切板图片失败: {err}");
+                }
+            }
             crate::storage::touch_clip(updated.id, now, updated.source_app.as_deref());
             drop(_mutation);
             eprintln!("剪切板图片已存在，挪到最前");

@@ -387,17 +387,6 @@ unsafe fn alloc_global(bytes: &[u8], slot: &mut HGLOBAL, prev: Option<HGLOBAL>) 
     *slot = handle;
     Ok(handle)
 }
-#[allow(dead_code)]
-unsafe fn alloc_global_unused(bytes: &[u8]) -> Result<HGLOBAL, String> {
-    let handle = GlobalAlloc(GMEM_MOVEABLE, bytes.len()).map_err(|err| err.to_string())?;
-    let locked = GlobalLock(handle);
-    if locked.is_null() {
-        return Err({ let _ = GlobalFree(Some(handle)); "无法锁定剪切板内存".into() });
-    }
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), locked as *mut u8, bytes.len());
-    let _ = GlobalUnlock(handle);
-    Ok(handle)
-}
 
 /// CF_DIB 的 alpha 通道在各家软件里表现不一致，所以先把半透明合成到白底。
 fn build_dib(width: u32, height: u32, bgra: &[u8]) -> Result<Vec<u8>, String> {
@@ -569,6 +558,7 @@ fn decode_dib(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     let planes = u16::from_le_bytes(bytes[12..14].try_into().ok()?);
     let bit_count = u16::from_le_bytes(bytes[14..16].try_into().ok()?);
     let compression = u32::from_le_bytes(bytes[16..20].try_into().ok()?);
+    let clr_used = u32::from_le_bytes(bytes[32..36].try_into().ok()?) as usize;
     if planes != 1 || width <= 0 || height == 0 || (bit_count != 24 && bit_count != 32) {
         return None;
     }
@@ -581,9 +571,30 @@ fn decode_dib(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     if i64::from(width_u) * i64::from(abs_height) > MAX_PIXELS {
         return None;
     }
-    let pixel_offset = if compression == 3 && header == 40 { header + 12 } else { header };
-    let row_bytes = (bit_count as usize * width as usize).div_ceil(32) * 4;
-    let needed = pixel_offset + row_bytes * abs_height as usize;
+    let pixel_offset = if compression == 3 && header == 40 {
+        header.checked_add(12)?
+    } else if compression == 0 && header == 40 {
+        header.checked_add(clr_used.checked_mul(4)?)?
+    } else {
+        header
+    };
+    let bitfields = if compression == 3 && bit_count == 32 && bytes.len() >= 52 {
+        let r_mask = u32::from_le_bytes(bytes[40..44].try_into().ok()?);
+        let g_mask = u32::from_le_bytes(bytes[44..48].try_into().ok()?);
+        let b_mask = u32::from_le_bytes(bytes[48..52].try_into().ok()?);
+        if r_mask != 0 && g_mask != 0 && b_mask != 0 {
+            Some((r_mask, g_mask, b_mask))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let row_bytes = (bit_count as usize)
+        .checked_mul(width as usize)?
+        .div_ceil(32)
+        .checked_mul(4)?;
+    let needed = pixel_offset.checked_add(row_bytes.checked_mul(abs_height as usize)?)?;
     if bytes.len() < needed {
         return None;
     }
@@ -594,11 +605,28 @@ fn decode_dib(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
         let src = pixel_offset + src_y * row_bytes;
         let dst = y * width as usize * 4;
         if bit_count == 32 {
-            for x in 0..width as usize {
-                let from = src + x * 4;
-                let to = dst + x * 4;
-                bgra[to..to + 3].copy_from_slice(&bytes[from..from + 3]);
-                bgra[to + 3] = 255;
+            if let Some((r_mask, g_mask, b_mask)) = bitfields {
+                for x in 0..width as usize {
+                    let from = src + x * 4;
+                    let to = dst + x * 4;
+                    let px = u32::from_le_bytes([
+                        bytes[from],
+                        bytes[from + 1],
+                        bytes[from + 2],
+                        bytes[from + 3],
+                    ]);
+                    bgra[to] = extract_mask_channel(px, b_mask);
+                    bgra[to + 1] = extract_mask_channel(px, g_mask);
+                    bgra[to + 2] = extract_mask_channel(px, r_mask);
+                    bgra[to + 3] = 255;
+                }
+            } else {
+                for x in 0..width as usize {
+                    let from = src + x * 4;
+                    let to = dst + x * 4;
+                    bgra[to..to + 3].copy_from_slice(&bytes[from..from + 3]);
+                    bgra[to + 3] = 255;
+                }
             }
         } else {
             for x in 0..width as usize {
@@ -612,6 +640,20 @@ fn decode_dib(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
         }
     }
     Some((width_u, abs_height, bgra))
+}
+
+fn extract_mask_channel(pixel: u32, mask: u32) -> u8 {
+    let shift = mask.trailing_zeros();
+    let max_val = mask >> shift;
+    if max_val == 0 {
+        return 0;
+    }
+    let raw = (pixel & mask) >> shift;
+    if max_val == 255 {
+        raw as u8
+    } else {
+        ((u64::from(raw) * 255 + u64::from(max_val) / 2) / u64::from(max_val)) as u8
+    }
 }
 
 unsafe fn duplicate_clipboard_bitmap() -> Result<Option<HBITMAP>, String> {
@@ -854,5 +896,36 @@ mod tests {
         assert!(can_include_in_history_flag_is_denied(&0u32.to_le_bytes()));
         assert!(!can_include_in_history_flag_is_denied(&1u32.to_le_bytes()));
         assert!(!can_include_in_history_flag_is_denied(&[0, 0]));
+    }
+
+    #[test]
+    fn decode_dib_honors_rgba_bitfields_and_clr_used_offset() {
+        // BITMAPV5HEADER with RGBA masks (R=0x000000FF, G=0x0000FF00, B=0x00FF0000)
+        let mut rgba_v5 = vec![0u8; 128];
+        rgba_v5[0..4].copy_from_slice(&124u32.to_le_bytes());
+        rgba_v5[4..8].copy_from_slice(&1i32.to_le_bytes());
+        rgba_v5[8..12].copy_from_slice(&1i32.to_le_bytes());
+        rgba_v5[12..14].copy_from_slice(&1u16.to_le_bytes());
+        rgba_v5[14..16].copy_from_slice(&32u16.to_le_bytes());
+        rgba_v5[16..20].copy_from_slice(&3u32.to_le_bytes());
+        rgba_v5[40..44].copy_from_slice(&0x0000_00FFu32.to_le_bytes());
+        rgba_v5[44..48].copy_from_slice(&0x0000_FF00u32.to_le_bytes());
+        rgba_v5[48..52].copy_from_slice(&0x00FF_0000u32.to_le_bytes());
+        // Pixel bytes: R=10, G=20, B=30, A=255 -> BGRA should be [30, 20, 10, 255]
+        rgba_v5[124..128].copy_from_slice(&[10, 20, 30, 255]);
+        let (_, _, bgra) = decode_dib(&rgba_v5).unwrap();
+        assert_eq!(bgra, vec![30, 20, 10, 255]);
+
+        // 40-byte BI_RGB header with biClrUsed = 2 (8 bytes palette before pixels)
+        let mut with_palette = vec![0u8; 40 + 8 + 4];
+        with_palette[0..4].copy_from_slice(&40u32.to_le_bytes());
+        with_palette[4..8].copy_from_slice(&1i32.to_le_bytes());
+        with_palette[8..12].copy_from_slice(&1i32.to_le_bytes());
+        with_palette[12..14].copy_from_slice(&1u16.to_le_bytes());
+        with_palette[14..16].copy_from_slice(&32u16.to_le_bytes());
+        with_palette[32..36].copy_from_slice(&2u32.to_le_bytes());
+        with_palette[48..52].copy_from_slice(&[5, 6, 7, 0]);
+        let (_, _, pal_bgra) = decode_dib(&with_palette).unwrap();
+        assert_eq!(pal_bgra, vec![5, 6, 7, 255]);
     }
 }

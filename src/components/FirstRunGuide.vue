@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useSettingsStore } from "../stores/settings";
 
 import { useI18n } from "../i18n";
@@ -7,6 +7,7 @@ import { useI18n } from "../i18n";
 const settings = useSettingsStore();
 const { t } = useI18n();
 const index = ref(0);
+const nextBtn = ref<HTMLButtonElement | null>(null);
 
 const steps = computed(() => {
   const summon = settings.settings.summonShortcut;
@@ -48,6 +49,29 @@ function next() {
 function skip() {
   void settings.finishGuide();
 }
+
+function onGuideKey(event: KeyboardEvent) {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    skip();
+  } else if (event.key === "ArrowRight") {
+    event.preventDefault();
+    next();
+  } else if (event.key === "ArrowLeft" && index.value > 0) {
+    event.preventDefault();
+    index.value -= 1;
+  }
+}
+
+onMounted(() => {
+  nextBtn.value?.focus();
+  window.addEventListener("keydown", onGuideKey, true);
+});
+
+onUnmounted(() => {
+  window.removeEventListener("keydown", onGuideKey, true);
+});
 </script>
 
 <template>
@@ -79,7 +103,7 @@ function skip() {
       </div>
       <div class="actions">
         <button type="button" @click="skip">{{ t("skip") }}</button>
-        <button type="button" class="pri" @click="next">{{ last ? t("start") : t("next") }}</button>
+        <button ref="nextBtn" type="button" class="pri" @click="next">{{ last ? t("start") : t("next") }}</button>
       </div>
     </div>
   </div>
